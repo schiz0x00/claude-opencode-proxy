@@ -336,47 +336,36 @@ export function createFromGoogleChunk(): (part: string) => CommonChunk | null {
       usage,
     });
 
-    let out: CommonChunk | null = null;
+    let delta: CommonChunk["choices"][0]["delta"] = {};
     for (const part of candidate?.content?.parts ?? []) {
       if (part.text !== undefined) {
-        out = chunk({ content: part.text });
+        delta = { content: part.text };
       } else if (part.functionCall) {
         toolName = part.functionCall.name ?? "";
         toolIndex = candidate?.index ?? 0;
-        out = chunk({
+        delta = {
           tool_calls: [
             { index: toolIndex, id: `call_${toolName}`, type: "function", function: { name: toolName, arguments: "" } },
           ],
-        });
+        };
       }
     }
-    if (candidate?.finishReason && !sawFinish) {
-      sawFinish = true;
-      out = chunk(
-        {},
-        mapFinishReason(candidate.finishReason),
-        resp.usageMetadata
-          ? {
-              prompt_tokens: resp.usageMetadata.promptTokenCount ?? 0,
-              completion_tokens: resp.usageMetadata.candidatesTokenCount ?? 0,
-              total_tokens: resp.usageMetadata.totalTokenCount,
-              prompt_tokens_details: { cached_tokens: resp.usageMetadata.cachedContentTokenCount },
-            }
-          : undefined,
-      );
-    } else if (resp.usageMetadata) {
-      out = chunk(
-        {},
-        null,
-        {
+    // A single Gemini SSE response may carry text AND finishReason AND usage
+    // together — combine them into one chunk so nothing is dropped.
+    const finish = candidate?.finishReason && !sawFinish ? mapFinishReason(candidate.finishReason) : null;
+    if (finish) sawFinish = true;
+    const usage = resp.usageMetadata
+      ? {
           prompt_tokens: resp.usageMetadata.promptTokenCount ?? 0,
           completion_tokens: resp.usageMetadata.candidatesTokenCount ?? 0,
           total_tokens: resp.usageMetadata.totalTokenCount,
           prompt_tokens_details: { cached_tokens: resp.usageMetadata.cachedContentTokenCount },
-        },
-      );
+        }
+      : undefined;
+    if (Object.keys(delta).length > 0 || finish || usage) {
+      return chunk(delta, finish, usage);
     }
-    return out;
+    return null;
   };
 }
 
