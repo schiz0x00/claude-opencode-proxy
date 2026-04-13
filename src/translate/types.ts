@@ -15,9 +15,10 @@ export type CommonContentPart =
   | { type: "image_url"; image_url: { url: string } };
 
 export interface CommonToolCall {
-  id: string;
-  type: "function";
+  id?: string; // omitted on streaming continuation deltas
+  type?: "function";
   function: { name: string; arguments: string }; // arguments = JSON string
+  index?: number; // streaming converters track the tool-call index
 }
 
 export interface CommonTool {
