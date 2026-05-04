@@ -1,4 +1,8 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import path from "node:path";
 import { STATIC_MODELS, type StaticModelEntry } from "./data/models.static.js";
+import type { Logger } from "./logging.js";
 import type { Backend } from "./types.js";
 import type { Format } from "./translate/types.js";
 
@@ -32,15 +36,29 @@ export interface ResolvedModel {
   contextVariant?: "1m";
 }
 
+export interface RegistryRefreshOptions {
+  /** Upstream base URL used for live `GET {base}/v1/models` discovery. */
+  baseUrl: string;
+  /** Cache file path (mode 0600). */
+  cacheFile: string;
+  logger: Logger;
+  /** Per-fetch timeout in ms (default 3000). */
+  timeoutMs?: number;
+}
+
 export interface ModelRegistry {
   getBackendModels(): ModelEntry[];
   resolveModel(id: string): ResolvedModel | undefined;
   toAliasId(entry: ModelEntry): string;
   fromAliasId(alias: string): string | undefined;
   modelCount(): number;
+  /** Live discovery + catalog merge + cache (spec §10.4). */
+  refresh(opts: RegistryRefreshOptions): Promise<void>;
 }
 
 const ALIAS_PREFIX = "claude-ocx-";
+const CATALOG_URL = "https://models.opencode.ai/catalog.json";
+const CACHE_VERSION = 1;
 
 /** Conservative defaults for unknown models (spec §11.1). */
 function defaultCapabilities(): Capabilities {
@@ -59,9 +77,31 @@ function defaultCapabilities(): Capabilities {
   };
 }
 
+interface CacheFile {
+  version: number;
+  backend: Backend;
+  fetchedAt: number;
+  models: Array<{
+    id: string;
+    format: Format;
+    contextWindow: number;
+    maxOutput: number;
+    displayName?: string;
+    provider?: string;
+  }>;
+}
+
+/** Expand `~` in a cache path. */
+function expandHome(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return path.join(homedir(), p.slice(2));
+  return p;
+}
+
 /**
- * Create a registry bound to one backend (spec §10). Phase 1: static
- * snapshot only; Phase 4 adds live discovery + cache + `/v1/models`.
+ * Create a registry bound to one backend (spec §10). Static snapshot is the
+ * authoritative baseline; `refresh()` merges live discovery + catalog on top
+ * and persists to a 0600 cache file.
  */
 export function createRegistry(backend: Backend): ModelRegistry {
   const entries = new Map<string, ModelEntry>();
@@ -109,11 +149,145 @@ export function createRegistry(backend: Backend): ModelRegistry {
     return rest.slice(sep + 2);
   }
 
+  /** Load the cache file; returns entries or undefined on any failure. */
+  async function loadCache(cacheFile: string): Promise<CacheFile["models"] | undefined> {
+    try {
+      const raw = await readFile(expandHome(cacheFile), "utf8");
+      const parsed = JSON.parse(raw) as CacheFile;
+      if (parsed.version !== CACHE_VERSION || parsed.backend !== backend) return undefined;
+      if (!Array.isArray(parsed.models)) return undefined;
+      return parsed.models;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Persist the current entries to the cache file (mode 0600). */
+  async function saveCache(cacheFile: string): Promise<void> {
+    const data: CacheFile = {
+      version: CACHE_VERSION,
+      backend,
+      fetchedAt: Math.floor(Date.now() / 1000),
+      models: [...entries.values()].map((e) => ({
+        id: e.id,
+        format: e.format,
+        contextWindow: e.contextWindow,
+        maxOutput: e.maxOutput,
+        displayName: e.displayName,
+        provider: e.provider,
+      })),
+    };
+    const file = expandHome(cacheFile);
+    await writeFile(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+  }
+
+  /** Fetch live model ids from `{base}/v1/models` (bare ids, spec §10.4). */
+  async function fetchLiveIds(baseUrl: string, timeoutMs: number): Promise<string[]> {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${baseUrl}/v1/models`, { signal: controller.signal });
+      if (!res.ok) return [];
+      const json = (await res.json()) as { data?: Array<{ id?: string }> };
+      return (json.data ?? []).map((m) => m.id).filter((id): id is string => typeof id === "string");
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  /** Fetch catalog metadata (context/output) from models.opencode.ai. */
+  async function fetchCatalog(
+    timeoutMs: number,
+  ): Promise<Map<string, { contextWindow?: number; maxOutput?: number }>> {
+    const out = new Map<string, { contextWindow?: number; maxOutput?: number }>();
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(CATALOG_URL, { signal: controller.signal });
+      if (!res.ok) return out;
+      const json = (await res.json()) as Record<string, unknown>;
+      // Catalog entries are provider-prefixed (e.g. "deepseek/deepseek-v4-pro").
+      for (const [key, value] of Object.entries(json)) {
+        const id = key.includes("/") ? key.slice(key.indexOf("/") + 1) : key;
+        const v = value as { context_window?: number; max_output?: number; contextWindow?: number; maxOutput?: number };
+        out.set(id, {
+          contextWindow: v.context_window ?? v.contextWindow,
+          maxOutput: v.max_output ?? v.maxOutput,
+        });
+      }
+    } catch {
+      // ignore — catalog is best-effort
+    } finally {
+      clearTimeout(t);
+    }
+    return out;
+  }
+
+  async function refresh(opts: RegistryRefreshOptions): Promise<void> {
+    const { baseUrl, cacheFile, logger } = opts;
+    const timeoutMs = opts.timeoutMs ?? 3000;
+
+    // 1. Cache is the fastest baseline (offline startup works).
+    const cached = await loadCache(cacheFile);
+    if (cached && cached.length > 0) {
+      mergeEntries(cached);
+      logger.debug(`model cache loaded (${cached.length} models)`);
+    }
+
+    // 2. Live discovery + catalog metadata.
+    let liveIds: string[] = [];
+    let catalog: Map<string, { contextWindow?: number; maxOutput?: number }> = new Map();
+    try {
+      [liveIds, catalog] = await Promise.all([fetchLiveIds(baseUrl, timeoutMs), fetchCatalog(timeoutMs)]);
+    } catch {
+      // fall through with whatever we have
+    }
+
+    if (liveIds.length > 0) {
+      // Live ids win: keep existing metadata where known, else defaults.
+      const merged: Array<Omit<ModelEntry, "capabilities">> = [];
+      for (const id of liveIds) {
+        const existing = entries.get(id);
+        const cat = catalog.get(id);
+        merged.push({
+          id,
+          format: existing?.format ?? defaultFormatFor(id),
+          contextWindow: cat?.contextWindow ?? existing?.contextWindow ?? 200_000,
+          maxOutput: cat?.maxOutput ?? existing?.maxOutput ?? 64_000,
+          displayName: existing?.displayName,
+          provider: existing?.provider,
+        });
+      }
+      // Static-only models not seen live are kept (docs may lag the API).
+      for (const [id, e] of entries) {
+        if (!merged.some((m) => m.id === id)) merged.push(e);
+      }
+      mergeEntries(merged);
+      logger.info(`model discovery: ${liveIds.length} live ids, ${entries.size} total`);
+    }
+
+    // 3. Persist.
+    await saveCache(cacheFile);
+  }
+
+  /** Default format for a live id with no static metadata. */
+  function defaultFormatFor(id: string): Format {
+    return id.endsWith("-free") ? "oa-compat" : "oa-compat";
+  }
+
+  function mergeEntries(models: Array<Omit<ModelEntry, "capabilities">>): void {
+    entries.clear();
+    for (const m of models) {
+      entries.set(m.id, { ...m, capabilities: defaultCapabilities() });
+    }
+  }
+
   return {
     getBackendModels: () => [...entries.values()],
     resolveModel,
     toAliasId,
     fromAliasId,
     modelCount: () => entries.size,
+    refresh,
   };
 }
