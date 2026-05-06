@@ -147,11 +147,31 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
 }
 
 /**
- * GET /v1/models (spec §4.3). Phase 1 stub: empty list so gateway model
- * discovery degrades gracefully; Phase 4 serves the full alias catalog.
+ * GET /v1/models (spec §4.3, §5.1). Serves the active backend's models as
+ * Anthropic-native alias ids (`claude-ocx-<format>--<model>`) so gateway
+ * model discovery (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) can
+ * populate Claude Code's `/model` picker. Models with a 1M context window
+ * get an extra `[1m]` variant row.
  */
-export async function handleModels(_c: Context, _deps: RouterDeps): Promise<Response> {
-  return new Response(JSON.stringify({ data: [] }), {
+export async function handleModels(_c: Context, deps: RouterDeps): Promise<Response> {
+  const { registry } = deps;
+  const created = Math.floor(Date.now() / 1000);
+  const data: Array<Record<string, unknown>> = [];
+  for (const entry of registry.getBackendModels()) {
+    const alias = registry.toAliasId(entry);
+    const row = {
+      id: alias,
+      object: "model",
+      created,
+      owned_by: "opencode",
+      display_name: entry.displayName ?? entry.id,
+    };
+    data.push(row);
+    if (entry.contextWindow >= 1_000_000) {
+      data.push({ ...row, id: `${alias}[1m]` });
+    }
+  }
+  return new Response(JSON.stringify({ object: "list", data }), {
     status: 200,
     headers: { "content-type": "application/json" },
   });
