@@ -20,7 +20,7 @@ if (config.backend === "free") {
   );
 }
 
-// Model registry (static snapshot in Phase 1; discovery + cache in Phase 4).
+// Model registry: static snapshot baseline + live discovery/cache (Phase 4).
 const registry = createRegistry(config.backend);
 logger.info(`loaded ${registry.modelCount()} models for backend ${config.backend}`);
 
@@ -43,8 +43,26 @@ const server = serve({
 ready = true;
 logger.info(`listening on http://${config.host}:${config.port}`);
 
+// Live model discovery: refresh at startup (non-blocking) and every TTL.
+async function refreshModels(): Promise<void> {
+  try {
+    await registry.refresh({
+      baseUrl: config.baseUrl,
+      cacheFile: config.modelCacheFile,
+      logger,
+    });
+  } catch (err) {
+    logger.warn(`model refresh failed: ${(err as Error).message}`);
+  }
+}
+
+void refreshModels();
+const refreshTimer = setInterval(refreshModels, config.modelCacheTtl * 1000);
+refreshTimer.unref();
+
 function shutdown(signal: string): void {
   logger.info(`received ${signal}, shutting down`);
+  clearInterval(refreshTimer);
   server.close(() => process.exit(0));
   // Force-exit if in-flight requests refuse to drain.
   setTimeout(() => process.exit(0), 5000).unref();
