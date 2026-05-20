@@ -91,6 +91,12 @@ interface CacheFile {
   }>;
 }
 
+interface CatalogMeta {
+  contextWindow?: number;
+  maxOutput?: number;
+  capabilities?: Partial<Capabilities>;
+}
+
 /** Expand `~` in a cache path. */
 function expandHome(p: string): string {
   if (p === "~") return homedir();
@@ -195,11 +201,11 @@ export function createRegistry(backend: Backend): ModelRegistry {
     }
   }
 
-  /** Fetch catalog metadata (context/output) from models.opencode.ai. */
+  /** Fetch catalog metadata (context/output/capabilities) from models.opencode.ai. */
   async function fetchCatalog(
     timeoutMs: number,
-  ): Promise<Map<string, { contextWindow?: number; maxOutput?: number }>> {
-    const out = new Map<string, { contextWindow?: number; maxOutput?: number }>();
+  ): Promise<Map<string, CatalogMeta>> {
+    const out = new Map<string, CatalogMeta>();
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -209,11 +215,7 @@ export function createRegistry(backend: Backend): ModelRegistry {
       // Catalog entries are provider-prefixed (e.g. "deepseek/deepseek-v4-pro").
       for (const [key, value] of Object.entries(json)) {
         const id = key.includes("/") ? key.slice(key.indexOf("/") + 1) : key;
-        const v = value as { context_window?: number; max_output?: number; contextWindow?: number; maxOutput?: number };
-        out.set(id, {
-          contextWindow: v.context_window ?? v.contextWindow,
-          maxOutput: v.max_output ?? v.maxOutput,
-        });
+        out.set(id, catalogMeta(value));
       }
     } catch {
       // ignore — catalog is best-effort
@@ -221,6 +223,26 @@ export function createRegistry(backend: Backend): ModelRegistry {
       clearTimeout(t);
     }
     return out;
+  }
+
+  /** Extract capability metadata from a catalog entry (spec §11.1). */
+  function catalogMeta(value: unknown): CatalogMeta {
+    const v = (value ?? {}) as Record<string, any>;
+    const limit = (v.limit ?? {}) as Record<string, any>;
+    const modalities = (v.modalities ?? {}) as Record<string, any>;
+    const input = Array.isArray(modalities.input) ? modalities.input : [];
+    return {
+      contextWindow: limit.context,
+      maxOutput: limit.output,
+      capabilities: {
+        reasoning: v.reasoning === true,
+        tools: v.tool_call !== false,
+        vision: input.includes("image"),
+        audio: input.includes("audio"),
+        structuredOutput: v.structured_output === true,
+        fileCompatibility: v.attachment === true,
+      },
+    };
   }
 
   async function refresh(opts: RegistryRefreshOptions): Promise<void> {
@@ -236,7 +258,7 @@ export function createRegistry(backend: Backend): ModelRegistry {
 
     // 2. Live discovery + catalog metadata.
     let liveIds: string[] = [];
-    let catalog: Map<string, { contextWindow?: number; maxOutput?: number }> = new Map();
+    let catalog: Map<string, CatalogMeta> = new Map();
     try {
       [liveIds, catalog] = await Promise.all([fetchLiveIds(baseUrl, timeoutMs), fetchCatalog(timeoutMs)]);
     } catch {
@@ -245,7 +267,7 @@ export function createRegistry(backend: Backend): ModelRegistry {
 
     if (liveIds.length > 0) {
       // Live ids win: keep existing metadata where known, else defaults.
-      const merged: Array<Omit<ModelEntry, "capabilities">> = [];
+      const merged: Array<Omit<ModelEntry, "capabilities"> & { capabilities?: Partial<Capabilities> }> = [];
       for (const id of liveIds) {
         const existing = entries.get(id);
         const cat = catalog.get(id);
@@ -256,6 +278,7 @@ export function createRegistry(backend: Backend): ModelRegistry {
           maxOutput: cat?.maxOutput ?? existing?.maxOutput ?? 64_000,
           displayName: existing?.displayName,
           provider: existing?.provider,
+          capabilities: cat?.capabilities,
         });
       }
       // Static-only models not seen live are kept (docs may lag the API).
@@ -275,10 +298,13 @@ export function createRegistry(backend: Backend): ModelRegistry {
     return id.endsWith("-free") ? "oa-compat" : "oa-compat";
   }
 
-  function mergeEntries(models: Array<Omit<ModelEntry, "capabilities">>): void {
+  function mergeEntries(models: Array<Omit<ModelEntry, "capabilities"> & { capabilities?: Partial<Capabilities> }>): void {
     entries.clear();
     for (const m of models) {
-      entries.set(m.id, { ...m, capabilities: defaultCapabilities() });
+      entries.set(m.id, {
+        ...m,
+        capabilities: { ...defaultCapabilities(), ...(m.capabilities ?? {}) },
+      });
     }
   }
 

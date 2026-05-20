@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { extractApiKey } from "./auth.js";
+import { stripUnsupported } from "./capability.js";
 import type { Config } from "./config.js";
 import { ProxyError } from "./errors.js";
 import type { Logger } from "./logging.js";
@@ -54,6 +55,12 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
   const isStream = body.stream === true;
 
   const provider = getProvider(format, { model: modelId, providerModel: entry.id });
+
+  // Strip capabilities the model doesn't support (spec §11.2) before
+  // translating, so unsupported fields never reach the backend.
+  if (config.stripUnsupported) {
+    stripUnsupported(body, entry.capabilities, logger);
+  }
 
   // Translate the request body (identity for anthropic passthrough).
   let upstreamBody: any;
