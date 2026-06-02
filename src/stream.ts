@@ -1,4 +1,4 @@
-import { createStreamPartConverter } from "./translate/provider.js";
+import { createStreamPartConverter, getProvider } from "./translate/provider.js";
 import type { Format } from "./translate/types.js";
 
 export interface PumpOptions {
@@ -23,6 +23,7 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const convert = createStreamPartConverter(upstreamFormat, clientFormat);
   const sameFormat = upstreamFormat === clientFormat;
+  const usageParser = getProvider(upstreamFormat, { model: "", providerModel: "" }).createUsageParser();
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -35,7 +36,6 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
       let lastWrite = Date.now();
       let upstreamDone = false;
       let sawMessageStop = false;
-      let usage: any;
 
       const keepAlive = setInterval(() => {
         if (upstreamDone) return;
@@ -54,6 +54,7 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
       const processBlock = (block: string): void => {
         if (eventType(block) === "message_stop") sawMessageStop = true;
         if (upstreamFormat === "oa-compat" && block.trim() === "data: [DONE]") return;
+        usageParser.parse(block);
         if (sameFormat) {
           emit(block);
           return;
@@ -79,6 +80,19 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
 
       if (clientFormat === "anthropic" && !sawMessageStop) {
         controller.enqueue(encoder.encode(`event: message_stop\ndata: {"type":"message_stop"}\n\n`));
+      }
+
+      // Cost ping (spec §9.2.7): after the final chunk, from normalized usage.
+      if (emitCostPings) {
+        const usage = usageParser.retrieve();
+        if (usage) {
+          const normalized = getProvider(upstreamFormat, { model: "", providerModel: "" }).normalizeUsage(usage);
+          controller.enqueue(
+            encoder.encode(
+              `event: ping\ndata: ${JSON.stringify({ type: "ping", cost: normalized })}\n\n`,
+            ),
+          );
+        }
       }
       controller.close();
     },

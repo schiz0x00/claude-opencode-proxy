@@ -33,10 +33,11 @@ export function oaCompatHelper(opts: ProviderHelperOptions): ProviderHelper {
       let usage: Usage | undefined;
       return {
         parse: (chunk: string) => {
-          if (!chunk.startsWith("data: ")) return;
+          const data = chunk.split("\n").find((l) => l.startsWith("data: "));
+          if (!data) return;
           let json: any;
           try {
-            json = JSON.parse(chunk.slice(6));
+            json = JSON.parse(data.slice(6));
           } catch {
             return;
           }

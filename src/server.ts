@@ -6,7 +6,7 @@ import { anthropicError, ProxyError } from "./errors.js";
 import { registerHealth } from "./health.js";
 import type { Logger } from "./logging.js";
 import type { ModelRegistry } from "./modelRegistry.js";
-import { handleMessages, handleModels, type RouterDeps } from "./router.js";
+import { handleCountTokens, handleMessages, handleModels, type RouterDeps } from "./router.js";
 
 export interface ServerDeps {
   config: Config;
@@ -40,6 +40,7 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Anthropic Messages API surface (spec §3).
   app.post("/v1/messages", (c) => handleMessages(c, routerDeps));
+  app.post("/v1/messages/count_tokens", (c) => handleCountTokens(c, routerDeps));
   app.get("/v1/models", (c) => handleModels(c, routerDeps));
 
   app.onError((err, c) => {
