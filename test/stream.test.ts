@@ -60,4 +60,37 @@ describe("pumpStream", () => {
     const out = await collect(pumpStream({ upstream, upstreamFormat: "anthropic", clientFormat: "anthropic" }));
     expect(out).toBe(body);
   });
+
+  it("emits a cost ping after the final chunk when emitCostPings", async () => {
+    const body = `event: message_start\ndata: {"type":"message_start"}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"input_tokens":10,"output_tokens":5}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n`;
+    const out = await collect(
+      pumpStream({ upstream: sseResponse(body), upstreamFormat: "anthropic", clientFormat: "anthropic", emitCostPings: true }),
+    );
+    const cost = out.match(/event: ping\ndata: (.*)\n\n/);
+    expect(cost).not.toBeNull();
+    const parsed = JSON.parse(cost![1]!);
+    expect(parsed.type).toBe("ping");
+    expect(parsed.cost.inputTokens).toBe(10);
+    expect(parsed.cost.outputTokens).toBe(5);
+  });
+
+  it("emits no cost ping when emitCostPings is off", async () => {
+    const body = `event: message_start\ndata: {"type":"message_start"}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n`;
+    const out = await collect(
+      pumpStream({ upstream: sseResponse(body), upstreamFormat: "anthropic", clientFormat: "anthropic" }),
+    );
+    expect(out).not.toContain('"cost"');
+  });
+
+  it("emits a cost ping from oa-compat usage chunks", async () => {
+    const body = `data: {"id":"x","object":"chat.completion.chunk","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\ndata: {"id":"x","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}\n\ndata: [DONE]\n\n`;
+    const out = await collect(
+      pumpStream({ upstream: sseResponse(body), upstreamFormat: "oa-compat", clientFormat: "anthropic", emitCostPings: true }),
+    );
+    const cost = out.match(/event: ping\ndata: (.*)\n\n/);
+    expect(cost).not.toBeNull();
+    const parsed = JSON.parse(cost![1]!);
+    expect(parsed.cost.inputTokens).toBe(7);
+    expect(parsed.cost.outputTokens).toBe(3);
+  });
 });
