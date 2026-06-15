@@ -156,7 +156,7 @@ export function toGoogleRequest(req: CommonRequest): GoogleRequest {
   const toolCallNames = new Map<string, string>();
   for (const m of req.messages) {
     for (const tc of m.tool_calls ?? []) {
-      if (tc.id) toolCallNames.set(tc.id, tc.function.name);
+      if (tc.id) toolCallNames.set(tc.id, tc.function.name ?? "");
     }
   }
   for (const m of req.messages) {

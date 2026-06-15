@@ -317,8 +317,13 @@ export function createFromOpenAIChunk(): (part: string) => CommonChunk | null {
       }
       case "response.function_call_arguments.delta":
         toolArgs += data.delta ?? "";
+        // Emit only the argument fragment (no `name`): downstream anthropic
+        // streaming treats a present `function.name` as a NEW tool-block start,
+        // so keeping `name` here would re-open the block for every delta and
+        // synthesize duplicate tool calls (mirrors the oa-compat convention
+        // where `name` appears only on the opening chunk).
         return chunk({
-          tool_calls: [{ index: toolIndex, function: { name: toolName, arguments: data.delta ?? "" } }],
+          tool_calls: [{ index: toolIndex, function: { arguments: data.delta ?? "" } }],
         });
       case "response.completed": {
         const usage = data.response?.usage;

@@ -277,7 +277,7 @@ export function toAnthropicRequest(req: CommonRequest): AnthropicRequest {
       content.push({
         type: "tool_use",
         id: tc.id ?? `toolu_${Math.random().toString(36).slice(2, 12)}`,
-        name: tc.function.name,
+        name: tc.function.name ?? "",
         input: safeJsonParse(tc.function.arguments),
       });
     }
@@ -362,7 +362,7 @@ export function toAnthropicResponse(resp: CommonResponse): AnthropicResponse {
     content.push({
       type: "tool_use",
       id: tc.id ?? `toolu_${Math.random().toString(36).slice(2, 12)}`,
-      name: tc.function.name,
+      name: tc.function.name ?? "",
       input: safeJsonParse(tc.function.arguments),
     });
   }

@@ -17,7 +17,9 @@ export type CommonContentPart =
 export interface CommonToolCall {
   id?: string; // omitted on streaming continuation deltas
   type?: "function";
-  function: { name: string; arguments: string }; // arguments = JSON string
+  // `name` is required on the opening tool-call chunk but omitted on
+  // continuation/argument deltas (streaming). Guard with `?.` downstream.
+  function: { name?: string; arguments: string }; // arguments = JSON string
   index?: number; // streaming converters track the tool-call index
 }
 
