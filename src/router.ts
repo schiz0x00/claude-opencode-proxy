@@ -54,7 +54,11 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
   const format = entry.format;
   const isStream = body.stream === true;
 
-  const provider = getProvider(format, { model: modelId, providerModel: entry.id });
+  const provider = getProvider(format, {
+    model: modelId,
+    providerModel: entry.id,
+    supports1m: entry.contextWindow >= 1_000_000 || resolved.contextVariant === "1m",
+  });
 
   // Strip capabilities the model doesn't support (spec §11.2) before
   // translating, so unsupported fields never reach the backend.
@@ -62,10 +66,13 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
     stripUnsupported(body, entry.capabilities, logger);
   }
 
-  // Translate the request body (identity for anthropic passthrough).
+  // Translate the request body (identity for anthropic passthrough), then apply
+  // any provider-specific body tweaks (e.g. oa-compat `stream_options.include_usage`
+  // on streaming requests so the upstream returns the final usage chunk).
   let upstreamBody: any;
   try {
     upstreamBody = createBodyConverter("anthropic", format)(body);
+    upstreamBody = provider.modifyBody(upstreamBody);
   } catch (err) {
     throw new ProxyError(501, (err as Error).message);
   }
@@ -184,20 +191,30 @@ export async function handleCountTokens(c: Context, deps: RouterDeps): Promise<R
       const v = c.req.header(name);
       if (v) headers.set(name, v);
     }
-    const provider = getProvider("anthropic", { model: modelId, providerModel: resolved.entry.id });
+    const provider = getProvider("anthropic", {
+      model: modelId,
+      providerModel: resolved.entry.id,
+      supports1m: resolved.entry.contextWindow >= 1_000_000 || resolved.contextVariant === "1m",
+    });
     provider.modifyHeaders(headers, apiKey ?? "", "");
     if (apiKey === undefined) {
       headers.delete("x-api-key");
       headers.delete("authorization");
       headers.delete("x-goog-api-key");
     }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
     try {
       // Base URL already carries `/v1` (reference pattern); append the
-      // endpoint suffix without it.
-      const upstream = await fetch(`${config.baseUrl}/messages/count_tokens`, {
+      // endpoint suffix without it. Retries honor OPENCODE_MAX_RETRIES; the
+      // timeout bounds the whole attempt (§12, §16).
+      const upstream = await fetchWithRetry(`${config.baseUrl}/messages/count_tokens`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
+        signal: controller.signal,
+        maxRetries: config.maxRetries,
+        logger,
       });
       const text = await upstream.text();
       return new Response(text, {
@@ -207,6 +224,8 @@ export async function handleCountTokens(c: Context, deps: RouterDeps): Promise<R
     } catch (err) {
       logger.warn(`count_tokens upstream failed: ${(err as Error).message}`);
       return localEstimate(body);
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

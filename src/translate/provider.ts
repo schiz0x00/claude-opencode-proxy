@@ -19,6 +19,12 @@ export interface ProviderHelperOptions {
   /** Real OpenCode model id. */
   providerModel: string;
   adjustCacheUsage?: boolean;
+  /**
+   * Whether the model supports a 1M context window (drives the anthropic
+   * `context-1m` beta header). Usually derived from the registry entry's
+   * context window or the requested `[1m]` variant.
+   */
+  supports1m?: boolean;
 }
 
 /**

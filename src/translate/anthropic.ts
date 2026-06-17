@@ -11,7 +11,13 @@ type Usage = {
 
 /** Anthropic Messages provider helper (spec §7.2). */
 export function anthropicHelper(opts: ProviderHelperOptions): ProviderHelper {
-  const supports1m = opts.model.includes("sonnet") || opts.model.includes("opus-4-6");
+  // 1M-context support is derived from the registry entry / `[1m]` variant
+  // (passed via opts.supports1m) and drives the `context-1m` beta header.
+  // Fall back to a name heuristic only when the flag isn't provided by the
+  // caller.
+  const supports1m =
+    opts.supports1m ??
+    (opts.model.includes("sonnet") || opts.model.includes("opus-4-6"));
   return {
     format: "anthropic",
     modifyUrl: (providerApi: string) => `${providerApi}/messages`,
