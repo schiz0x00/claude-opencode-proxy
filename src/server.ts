@@ -131,8 +131,23 @@ async function writeResponse(res: ServerResponse, response: Response): Promise<v
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        // Client disconnected mid-stream: cancel the body so the underlying
+        // stream's `cancel()` can abort the upstream fetch (spec §3.2/§9.2.6).
+        if (res.destroyed) {
+          await reader.cancel();
+          return;
+        }
         res.write(Buffer.from(value));
       }
+    } catch (err) {
+      // Writing to a closed socket throws — cancel upstream before rethrowing
+      // so in-flight requests drain rather than leak.
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore secondary cancel errors */
+      }
+      throw err;
     } finally {
       reader.releaseLock();
     }
