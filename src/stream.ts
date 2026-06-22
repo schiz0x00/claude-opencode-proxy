@@ -36,6 +36,7 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
       let lastWrite = Date.now();
       let upstreamDone = false;
       let sawMessageStop = false;
+      let sawError = false;
 
       const keepAlive = setInterval(() => {
         if (upstreamDone) return;
@@ -52,7 +53,11 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
       };
 
       const processBlock = (block: string): void => {
-        if (eventType(block) === "message_stop") sawMessageStop = true;
+        const ev = eventType(block);
+        if (ev === "message_stop") sawMessageStop = true;
+        // Mid-stream upstream error: forward verbatim and suppress the synthetic
+        // `message_stop` so we close the stream as the spec requires (§9.2.3).
+        if (ev === "error") sawError = true;
         if (upstreamFormat === "oa-compat" && block.trim() === "data: [DONE]") return;
         usageParser.parse(block);
         if (sameFormat) {
@@ -78,7 +83,7 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
         clearInterval(keepAlive);
       }
 
-      if (clientFormat === "anthropic" && !sawMessageStop) {
+      if (clientFormat === "anthropic" && !sawMessageStop && !sawError) {
         controller.enqueue(encoder.encode(`event: message_stop\ndata: {"type":"message_stop"}\n\n`));
       }
 
