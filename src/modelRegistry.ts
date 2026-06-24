@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { STATIC_MODELS, type StaticModelEntry } from "./data/models.static.js";
@@ -184,7 +184,14 @@ export function createRegistry(backend: Backend): ModelRegistry {
       })),
     };
     const file = expandHome(cacheFile);
-    await writeFile(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+    // Ensure the parent directory exists (fresh installs have no
+    // `~/.claude-opencode-proxy/` yet); otherwise writeFile throws ENOENT.
+    await mkdir(path.dirname(file), { recursive: true });
+    // Write atomically (temp file + rename) so a crash/torn write never leaves
+    // a partially-written cache (spec §3.2/§10.4), and keep mode 0600.
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    await rename(tmp, file);
   }
 
   /** Fetch live model ids from `{base}/v1/models` (bare ids, spec §10.4). */
@@ -245,7 +252,23 @@ export function createRegistry(backend: Backend): ModelRegistry {
     };
   }
 
+  // In-flight guard: never run two refreshes concurrently (spec §3.2).
+  let refreshInFlight: Promise<void> | null = null;
+
   async function refresh(opts: RegistryRefreshOptions): Promise<void> {
+    // A scheduled refresh that fires while one is already running simply joins
+    // the in-flight refresh rather than duplicating network + cache writes.
+    if (refreshInFlight) {
+      await refreshInFlight;
+      return;
+    }
+    refreshInFlight = doRefresh(opts).finally(() => {
+      refreshInFlight = null;
+    });
+    return refreshInFlight;
+  }
+
+  async function doRefresh(opts: RegistryRefreshOptions): Promise<void> {
     const { baseUrl, cacheFile, logger } = opts;
     const timeoutMs = opts.timeoutMs ?? 3000;
 
@@ -293,9 +316,11 @@ export function createRegistry(backend: Backend): ModelRegistry {
     await saveCache(cacheFile);
   }
 
-  /** Default format for a live id with no static metadata. */
-  function defaultFormatFor(id: string): Format {
-    return id.endsWith("-free") ? "oa-compat" : "oa-compat";
+  /** Default format for a live id with no static metadata (conservative). */
+  function defaultFormatFor(_id: string): Format {
+    // Every currently-known free/undocumented model routes through
+    // chat/completions; chat/completions is also the safest default.
+    return "oa-compat";
   }
 
   function mergeEntries(models: Array<Omit<ModelEntry, "capabilities"> & { capabilities?: Partial<Capabilities> }>): void {
