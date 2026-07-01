@@ -64,6 +64,23 @@ describe("registry refresh", () => {
     expect(parsed.models.length).toBeGreaterThan(0);
   });
 
+  it("creates missing parent directories when persisting the cache", async () => {
+    const r = createRegistry("free");
+    const d = await mkdtemp(path.join(tmpdir(), "ocx-parent-"));
+    // Nested directory that does not exist yet — the historical ENOENT bug.
+    const cacheFile = path.join(d, "deep", "nested", "models.json");
+    await r.refresh({ baseUrl: "http://127.0.0.1:1", cacheFile, logger, timeoutMs: 200 });
+    const stat = await import("node:fs/promises").then((fs) => fs.stat(cacheFile));
+    expect(stat.mode & 0o777).toBe(0o600);
+    const parsed = JSON.parse(await readFile(cacheFile, "utf8"));
+    expect(parsed.backend).toBe("free");
+    // No leftover temp files after the atomic rename.
+    const { readdir } = await import("node:fs/promises");
+    const files = await readdir(path.join(d, "deep", "nested"));
+    expect(files).toEqual(["models.json"]);
+    await rm(d, { recursive: true, force: true });
+  });
+
   it("loads a valid cache on refresh (offline startup)", async () => {
     const r = createRegistry("free");
     const cacheFile = await tempCache();

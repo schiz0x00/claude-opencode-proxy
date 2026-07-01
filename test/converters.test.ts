@@ -287,7 +287,24 @@ describe("createStreamPartConverter", () => {
     expect(out).toContain('"output_tokens":5');
   });
 
+  it("openai → anthropic emits a single tool_use block per tool (no duplicates)", () => {
+    const conv = createStreamPartConverter("openai", "anthropic");
+    const parts = [
+      'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"fc_1","name":"Bash","arguments":""}}',
+      'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"command\\":\\"ls\\"}"}',
+      'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"}"}',
+      'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r","object":"response","model":"m","output":[],"usage":{"input_tokens":10,"output_tokens":5}}}',
+    ];
+    const out = parts.map((p) => conv(p)).join("\n\n");
+    // Each argument delta must NOT re-open the tool block.
+    expect(out.match(/event: content_block_start/g) ?? []).toHaveLength(1);
+    expect(out).toContain('"type":"tool_use"');
+    expect(out).toContain('"name":"Bash"');
+    expect(out).toContain('"input_json_delta"');
+    expect(out).toContain('"stop_reason":"end_turn"');
+  });
   it("google → anthropic maps text parts and usage", () => {
+
     const conv = createStreamPartConverter("google", "anthropic");
     const parts = [
       'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":null,"index":0}]}',

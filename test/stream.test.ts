@@ -93,4 +93,17 @@ describe("pumpStream", () => {
     expect(parsed.cost.inputTokens).toBe(7);
     expect(parsed.cost.outputTokens).toBe(3);
   });
+
+  it("forwards a mid-stream error verbatim and closes without a synthetic message_stop", async () => {
+    const body = `event: message_start\ndata: {"type":"message_start"}\n\nevent: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}\n\n`;
+    const out = await collect(pumpStream({ upstream: sseResponse(body), upstreamFormat: "anthropic", clientFormat: "anthropic" }));
+    expect(out).toContain('"overloaded"');
+    expect(out).not.toContain("message_stop");
+  });
+
+  it("still appends message_stop when no mid-stream error occurred", async () => {
+    const body = `data: {"id":"x","object":"chat.completion.chunk","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n`;
+    const out = await collect(pumpStream({ upstream: sseResponse(body), upstreamFormat: "oa-compat", clientFormat: "anthropic" }));
+    expect(out).toContain("message_stop");
+  });
 });
