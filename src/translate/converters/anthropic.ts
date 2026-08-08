@@ -522,7 +522,8 @@ export function createFromAnthropicChunk(): (part: string) => string {
 export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
   let started = false;
   let blockIndex = 0;
-  let toolBlockIndex = -1;
+  /** oa-compat tool_call index → anthropic content block index. */
+  const toolBlocks = new Map<number, number>();
   let textBlockIndex = -1;
   let thinkingBlockIndex = -1;
   let sawFinish = false;
@@ -583,10 +584,10 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
       thinkingBlockIndex = -1;
     }
     if (delta?.content) {
-      if (toolBlockIndex !== -1) {
-        events.push(sse("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
-        toolBlockIndex = -1;
+      for (const target of toolBlocks.values()) {
+        events.push(sse("content_block_stop", { type: "content_block_stop", index: target }));
       }
+      toolBlocks.clear();
       // One text block spanning every consecutive text delta. Opening and
       // closing a block per delta is legal SSE but renders as one content
       // block per token, which the client lays out as separate lines.
@@ -610,6 +611,11 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
     }
 
     for (const tc of delta?.tool_calls ?? []) {
+      // Parallel tool calls stream interleaved, keyed by the oa-compat
+      // `index`. Each one owns its own anthropic block for the whole stream —
+      // a single "current tool block" would route call 0's argument deltas
+      // into call 1's block and hand the model's input to the wrong tool.
+      const callIndex = tc.index ?? 0;
       if (tc.function?.name) {
         // A tool call ends the text block that preceded it.
         if (textBlockIndex !== -1) {
@@ -628,27 +634,33 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
             },
           }),
         );
-        toolBlockIndex = blockIndex;
+        toolBlocks.set(callIndex, blockIndex);
         blockIndex++;
       }
       if (tc.function?.arguments) {
-        events.push(
-          sse("content_block_delta", {
-            type: "content_block_delta",
-            index: toolBlockIndex,
-            delta: { type: "input_json_delta", partial_json: tc.function.arguments },
-          }),
-        );
+        const target = toolBlocks.get(callIndex);
+        // Arguments before any name: the upstream never opened the call, so
+        // there is no block to attach them to. Dropping beats corrupting a
+        // sibling call's input.
+        if (target !== undefined) {
+          events.push(
+            sse("content_block_delta", {
+              type: "content_block_delta",
+              index: target,
+              delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+            }),
+          );
+        }
       }
     }
 
     const finish = choice?.finish_reason;
     if (finish && !sawFinish) {
       sawFinish = true;
-      if (toolBlockIndex !== -1) {
-        events.push(sse("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
-        toolBlockIndex = -1;
+      for (const target of toolBlocks.values()) {
+        events.push(sse("content_block_stop", { type: "content_block_stop", index: target }));
       }
+      toolBlocks.clear();
       if (textBlockIndex !== -1) {
         events.push(sse("content_block_stop", { type: "content_block_stop", index: textBlockIndex }));
         textBlockIndex = -1;
