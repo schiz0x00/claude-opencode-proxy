@@ -29,6 +29,14 @@ describe("createRegistry", () => {
     expect(m?.contextVariant).toBe("1m");
   });
 
+  it("rejects an alias whose format does not match the registry", () => {
+    const r = createRegistry("free");
+    // deepseek-v4-flash-free is oa-compat; an anthropic-flavoured alias for it
+    // would otherwise resolve and be sent through the wrong translator.
+    expect(r.resolveModel("claude-ocx-oa-compat--deepseek-v4-flash-free")).toBeDefined();
+    expect(r.resolveModel("claude-ocx-anthropic--deepseek-v4-flash-free")).toBeUndefined();
+  });
+
   it("returns undefined for unknown ids", () => {
     const r = createRegistry("free");
     expect(r.resolveModel("does-not-exist")).toBeUndefined();

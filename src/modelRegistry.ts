@@ -152,7 +152,13 @@ export function createRegistry(backend: Backend): ModelRegistry {
     let entry = entries.get(base);
     if (!entry) {
       const real = fromAliasId(base);
-      if (real) entry = entries.get(real);
+      if (real) {
+        const candidate = entries.get(real);
+        // The alias carries the wire format. Honouring an alias whose format
+        // disagrees with the registry would route the request through the
+        // wrong translator and produce a body the upstream cannot parse.
+        if (candidate && aliasFormat(base) === candidate.format) entry = candidate;
+      }
     }
     if (!entry) return undefined;
     return { entry, contextVariant };
@@ -160,6 +166,14 @@ export function createRegistry(backend: Backend): ModelRegistry {
 
   function toAliasId(entry: ModelEntry): string {
     return `${ALIAS_PREFIX}${entry.format}--${entry.id}`;
+  }
+
+  /** Format segment of an alias id, or undefined when it is not an alias. */
+  function aliasFormat(alias: string): string | undefined {
+    if (!alias.startsWith(ALIAS_PREFIX)) return undefined;
+    const rest = alias.slice(ALIAS_PREFIX.length);
+    const sep = rest.indexOf("--");
+    return sep === -1 ? undefined : rest.slice(0, sep);
   }
 
   function fromAliasId(alias: string): string | undefined {
