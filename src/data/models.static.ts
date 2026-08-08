@@ -87,6 +87,10 @@ const CTX: Record<string, [number, number]> = {
   "mimo-v2-omni": [1_048_576, 131_072],
   "hy3": [256_000, 64_000],
   "hy3-preview": [256_000, 64_000],
+  // Free-lane ids are deliberately absent: their windows differ from the paid
+  // sibling's (deepseek-v4-flash is 1M paid, 200K free) and change without
+  // notice, so they come from `providers.opencode.models.<id>.limit` at
+  // refresh, never from this table. DEFAULT_CONTEXT covers the cold start.
 };
 
 /** Free-tier display names (user-facing in the Claude Code picker). */

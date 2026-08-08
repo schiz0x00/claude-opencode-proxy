@@ -63,3 +63,42 @@ describe("static capability metadata", () => {
     expect(m?.entry.capabilities.promptCaching).toBe(false);
   });
 });
+describe("catalog refresh drives context windows", () => {
+  it("takes the free lane's own window from the catalog, not the static default", async () => {
+    const catalog = {
+      models: { "deepseek/deepseek-v4-flash": { limit: { context: 1_000_000, output: 384_000 } } },
+      providers: {
+        opencode: {
+          models: {
+            // Same model, free lane: separately capped. The static snapshot has
+            // no entry, so this is the only source of truth.
+            "deepseek-v4-flash-free": { limit: { context: 200_000, output: 128_000 } },
+            "longcat-2.0-free": { limit: { context: 1_000_000, output: 131_072 } },
+          },
+        },
+      },
+    };
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: any) =>
+      new Response(
+        JSON.stringify(
+          String(url).includes("catalog.json")
+            ? catalog
+            : { data: [{ id: "deepseek-v4-flash-free" }, { id: "longcat-2.0-free" }] },
+        ),
+        { status: 200 },
+      )) as typeof fetch;
+    try {
+      const r = createRegistry("free");
+      await r.refresh({
+        baseUrl: "https://example.invalid/v1",
+        cacheFile: `/tmp/registry-test-${Date.now()}.json`,
+        logger: { debug() {}, info() {}, warn() {}, error() {} } as never,
+      });
+      expect(r.resolveModel("deepseek-v4-flash-free")?.entry.contextWindow).toBe(200_000);
+      expect(r.resolveModel("longcat-2.0-free")?.entry.contextWindow).toBe(1_000_000);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
