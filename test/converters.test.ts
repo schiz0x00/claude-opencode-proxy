@@ -338,3 +338,102 @@ describe("createStreamPartConverter", () => {
     expect(conv("data: [DONE]")).toBe("data: [DONE]");
   });
 });
+// ---------------------------------------------------------------------------
+// Thinking mode: reasoning_content must survive the round trip, or providers
+// reject the follow-up turn ("The `reasoning_content` in the thinking mode
+// must be passed back to the API").
+// ---------------------------------------------------------------------------
+
+describe("thinking mode round trip", () => {
+  it("streams reasoning_content out as thinking blocks and back in", () => {
+    const toAnthropic = createStreamPartConverter("oa-compat", "anthropic");
+    const out = [
+      toAnthropic!(
+        'data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"pon"},"finish_reason":null}]}',
+      ),
+      toAnthropic!(
+        'data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"der"},"finish_reason":null}]}',
+      ),
+      toAnthropic!(
+        'data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}',
+      ),
+    ].join("\n\n");
+
+    expect(out).toContain('"type":"thinking"');
+    expect(out).toContain('"thinking":"pon"');
+    expect(out).toContain('"thinking":"der"');
+    // Thinking block closes before the text block opens.
+    expect(out.indexOf("content_block_stop")).toBeLessThan(out.indexOf('"text_delta"'));
+
+    // Client echoes the assembled thinking block back on the next turn.
+    const toUpstream = createBodyConverter("anthropic", "oa-compat");
+    const body = toUpstream!({
+      model: "m",
+      max_tokens: 16,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "ponder", signature: "sig" },
+            { type: "text", text: "hi" },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "again" }] },
+      ],
+    }) as any;
+
+    expect(body.messages[1].reasoning_content).toBe("ponder");
+  });
+});
+
+describe("streamed text blocks", () => {
+  it("keeps one text block open across deltas instead of one per token", () => {
+    const to = createStreamPartConverter("oa-compat", "anthropic")!;
+    const chunk = (delta: unknown, finish: string | null = null) =>
+      to(
+        `data: ${JSON.stringify({
+          id: "c",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "m",
+          choices: [{ index: 0, delta, finish_reason: finish }],
+        })}`,
+      );
+
+    const out = [
+      chunk({ content: "Hi" }),
+      chunk({ content: " there" }),
+      chunk({ content: "!" }),
+      chunk({}, "stop"),
+    ].join("\n\n");
+
+    const starts = out.match(/"type":"content_block_start"/g) ?? [];
+    const stops = out.match(/"type":"content_block_stop"/g) ?? [];
+    const deltas = out.match(/"type":"text_delta"/g) ?? [];
+    expect(starts).toHaveLength(1); // one block…
+    expect(deltas).toHaveLength(3); // …carrying every token…
+    expect(stops).toHaveLength(1); // …closed once, at the finish.
+    // Every delta targets that same block index.
+    expect(out.match(/"content_block_delta","index":(\d+)/g)?.every((m) => m.endsWith(":0"))).toBe(true);
+  });
+
+  it("closes the text block before opening a tool block", () => {
+    const to = createStreamPartConverter("oa-compat", "anthropic")!;
+    const chunk = (delta: unknown) =>
+      to(
+        `data: ${JSON.stringify({
+          id: "c",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "m",
+          choices: [{ index: 0, delta, finish_reason: null }],
+        })}`,
+      );
+    chunk({ content: "let me look" });
+    const out = chunk({
+      tool_calls: [{ index: 0, id: "t1", type: "function", function: { name: "Read", arguments: "" } }],
+    });
+    expect(out.indexOf("content_block_stop")).toBeLessThan(out.indexOf('"type":"tool_use"'));
+  });
+});

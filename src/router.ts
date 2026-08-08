@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { extractApiKey } from "./auth.js";
-import { stripUnsupported } from "./capability.js";
+import { applyReasoningEffort, stripUnsupported } from "./capability.js";
 import type { Config } from "./config.js";
 import { ProxyError } from "./errors.js";
 import type { Logger } from "./logging.js";
@@ -60,6 +60,10 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
     supports1m: entry.contextWindow >= 1_000_000 || resolved.contextVariant === "1m",
   });
 
+  // Captured before stripping: the anthropic `thinking` block is the only
+  // place Claude Code states reasoning effort, and it is translated away.
+  const thinking = body.thinking;
+
   // Strip capabilities the model doesn't support (spec §11.2) before
   // translating, so unsupported fields never reach the backend.
   if (config.stripUnsupported) {
@@ -72,6 +76,15 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
   let upstreamBody: any;
   try {
     upstreamBody = createBodyConverter("anthropic", format)(body);
+    // The client may have asked by alias id (`claude-ocx-<format>--<model>`,
+    // served by GET /v1/models for gateway model discovery) or by a `[1m]`
+    // variant. Neither exists upstream — always send the real OpenCode id.
+    upstreamBody.model = entry.id;
+    // Anthropic upstreams already speak `thinking` natively (identity
+    // conversion); everything else needs the catalog-advertised knob.
+    if (format !== "anthropic" && entry.capabilities.reasoning) {
+      applyReasoningEffort(upstreamBody, thinking, entry.reasoningOptions);
+    }
     upstreamBody = provider.modifyBody(upstreamBody);
   } catch (err) {
     throw new ProxyError(501, (err as Error).message);
@@ -211,7 +224,8 @@ export async function handleCountTokens(c: Context, deps: RouterDeps): Promise<R
       const upstream = await fetchWithRetry(`${config.baseUrl}/messages/count_tokens`, {
         method: "POST",
         headers,
-        body: JSON.stringify(body),
+        // Same alias rewrite as /v1/messages — upstream only knows real ids.
+        body: JSON.stringify({ ...body, model: resolved.entry.id }),
         signal: controller.signal,
         maxRetries: config.maxRetries,
         logger,

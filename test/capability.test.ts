@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stripUnsupported } from "../src/capability.js";
+import { applyReasoningEffort, stripUnsupported } from "../src/capability.js";
 import { createLogger } from "../src/logging.js";
 
 const logger = createLogger("error");
@@ -84,5 +84,54 @@ describe("stripUnsupported", () => {
     const before = JSON.stringify(body);
     stripUnsupported(body, caps(), logger);
     expect(JSON.stringify(body)).toBe(before);
+  });
+});
+// ---------------------------------------------------------------------------
+// Reasoning effort: Claude Code only sends `thinking.budget_tokens`, so the
+// budget must land on whatever knob the catalog says the model accepts.
+// ---------------------------------------------------------------------------
+
+describe("applyReasoningEffort", () => {
+  const think = (budget: number) => ({ type: "enabled", budget_tokens: budget });
+
+  it("maps budgets onto the model's advertised effort ladder", () => {
+    // deepseek-v4-flash-free advertises ["low","high","max"].
+    const values = ["low", "high", "max"];
+    const at = (budget: number) => {
+      const body: Record<string, any> = {};
+      applyReasoningEffort(body, think(budget), { effort: values });
+      return body.reasoning_effort;
+    };
+    expect(at(4_000)).toBe("low"); // "think"
+    expect(at(10_000)).toBe("high"); // "megathink"
+    expect(at(32_000)).toBe("max"); // "ultrathink"
+  });
+
+  it("never picks none/minimal for an enabled thinking block", () => {
+    const body: Record<string, any> = {};
+    applyReasoningEffort(body, think(1_000), { effort: ["none", "minimal", "low", "high"] });
+    expect(body.reasoning_effort).toBe("low");
+  });
+
+  it("prefers an explicit budget, clamped to the documented range", () => {
+    const body: Record<string, any> = {};
+    applyReasoningEffort(body, think(500), { budgetTokens: { min: 1024 } });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
+  });
+
+  it("sends a bare toggle when that is all the model takes", () => {
+    const body: Record<string, any> = {};
+    applyReasoningEffort(body, think(32_000), { toggle: true });
+    expect(body.thinking).toEqual({ type: "enabled" });
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it("touches nothing without a thinking block or without catalog options", () => {
+    const a: Record<string, any> = {};
+    applyReasoningEffort(a, undefined, { effort: ["low", "high"] });
+    expect(a).toEqual({});
+    const b: Record<string, any> = {};
+    applyReasoningEffort(b, think(10_000), undefined);
+    expect(b).toEqual({});
   });
 });

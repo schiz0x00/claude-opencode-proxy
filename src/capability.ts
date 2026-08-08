@@ -1,5 +1,70 @@
 import type { Logger } from "./logging.js";
-import type { Capabilities } from "./modelRegistry.js";
+import type { ReasoningOptions } from "./modelRegistry.js";
+import type { Capabilities } from "./types.js";
+
+/** Effort ladder, weakest first. Catalog values are a subset of this order. */
+const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Claude Code expresses reasoning effort only as `thinking.budget_tokens`
+ * ("think" ≈ 4k, "megathink" ≈ 10k, "ultrathink" ≈ 32k). Non-anthropic
+ * backends want a different knob, and which knob varies per model — the
+ * catalog's `reasoning_options` says which (spec §11.1). Map the budget onto
+ * whatever the model actually accepts, mutating `upstreamBody` in place.
+ *
+ * No-op when the request has no thinking block or the model advertises no
+ * reasoning options, so models that reject these fields never see them.
+ */
+export function applyReasoningEffort(
+  upstreamBody: Record<string, any>,
+  thinking: unknown,
+  options: ReasoningOptions | undefined,
+): void {
+  if (!options) return;
+  const t = thinking as { type?: string; budget_tokens?: number } | undefined;
+  if (!t || typeof t !== "object") return;
+  if (t.type !== "enabled") return;
+
+  const budget = typeof t.budget_tokens === "number" ? t.budget_tokens : undefined;
+
+  // An explicit budget is the most faithful mapping — pass it through, clamped
+  // to the range the model documents.
+  if (options.budgetTokens && budget !== undefined) {
+    const { min, max } = options.budgetTokens;
+    let value = budget;
+    if (min !== undefined) value = Math.max(value, min);
+    if (max !== undefined) value = Math.min(value, max);
+    upstreamBody.thinking = { type: "enabled", budget_tokens: value };
+    return;
+  }
+
+  if (options.effort && options.effort.length > 0) {
+    upstreamBody.reasoning_effort = pickEffort(options.effort, budget);
+    return;
+  }
+
+  // Toggle-only models take no level, just "reason at all".
+  if (options.toggle) upstreamBody.thinking = { type: "enabled" };
+}
+
+/**
+ * Pick the advertised effort value closest to the requested budget. The
+ * thresholds mirror Claude Code's three tiers; `none`/`minimal` are never
+ * chosen for an enabled thinking block, since asking to think and being told
+ * not to is worse than the nearest real level.
+ */
+function pickEffort(values: string[], budget: number | undefined): string {
+  const ladder = values
+    .filter((v) => EFFORT_ORDER.includes(v))
+    .sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b));
+  if (ladder.length === 0) return values[0] as string;
+  const usable = ladder.filter((v) => v !== "none" && v !== "minimal");
+  const scale = usable.length > 0 ? usable : ladder;
+  // <8k → weakest, <20k → middle, else strongest.
+  const tier = budget === undefined || budget >= 20_000 ? 2 : budget >= 8_000 ? 1 : 0;
+  const index = [0, Math.floor((scale.length - 1) / 2), scale.length - 1][tier] as number;
+  return scale[index] as string;
+}
 
 /**
  * Strip/downgrade unsupported capabilities from an Anthropic request body
