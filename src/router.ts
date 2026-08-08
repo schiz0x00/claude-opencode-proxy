@@ -264,6 +264,10 @@ function localEstimate(body: any): Response {
       else if (obj.input && typeof obj.input === "object") {
         chars += JSON.stringify(obj.input).length;
       }
+      // tool_result nests its payload under `content`, as a string or as
+      // further blocks. In an agent session that payload is most of the
+      // context, so skipping it made the estimate useless.
+      if (obj.content !== undefined) countText(obj.content);
     }
   };
   countText(body?.system);
