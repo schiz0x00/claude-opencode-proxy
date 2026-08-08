@@ -76,6 +76,10 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
   let upstreamBody: any;
   try {
     upstreamBody = createBodyConverter("anthropic", format)(body);
+    // The client may have asked by alias id (`claude-ocx-<format>--<model>`,
+    // served by GET /v1/models for gateway model discovery) or by a `[1m]`
+    // variant. Neither exists upstream — always send the real OpenCode id.
+    upstreamBody.model = entry.id;
     // Anthropic upstreams already speak `thinking` natively (identity
     // conversion); everything else needs the catalog-advertised knob.
     if (format !== "anthropic" && entry.capabilities.reasoning) {
@@ -220,7 +224,8 @@ export async function handleCountTokens(c: Context, deps: RouterDeps): Promise<R
       const upstream = await fetchWithRetry(`${config.baseUrl}/messages/count_tokens`, {
         method: "POST",
         headers,
-        body: JSON.stringify(body),
+        // Same alias rewrite as /v1/messages — upstream only knows real ids.
+        body: JSON.stringify({ ...body, model: resolved.entry.id }),
         signal: controller.signal,
         maxRetries: config.maxRetries,
         logger,
