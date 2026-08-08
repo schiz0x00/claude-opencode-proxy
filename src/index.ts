@@ -50,6 +50,7 @@ async function refreshModels(): Promise<void> {
       baseUrl: config.baseUrl,
       cacheFile: config.modelCacheFile,
       logger,
+      maxCacheAgeSeconds: config.modelCacheTtl,
     });
   } catch (err) {
     logger.warn(`model refresh failed: ${(err as Error).message}`);

@@ -47,6 +47,11 @@ export interface RegistryRefreshOptions {
   logger: Logger;
   /** Per-fetch timeout in ms (default 3000). */
   timeoutMs?: number;
+  /**
+   * Skip the network when the cache on disk is younger than this many seconds.
+   * Omit to always refresh.
+   */
+  maxCacheAgeSeconds?: number;
 }
 
 export interface ModelRegistry {
@@ -184,14 +189,15 @@ export function createRegistry(backend: Backend): ModelRegistry {
     return rest.slice(sep + 2);
   }
 
-  /** Load the cache file; returns entries or undefined on any failure. */
-  async function loadCache(cacheFile: string): Promise<CacheFile["models"] | undefined> {
+  /** Load the cache file; returns it or undefined on any failure. */
+  async function loadCache(cacheFile: string): Promise<CacheFile | undefined> {
     try {
       const raw = await readFile(expandHome(cacheFile), "utf8");
       const parsed = JSON.parse(raw) as CacheFile;
       if (parsed.version !== CACHE_VERSION || parsed.backend !== backend) return undefined;
       if (!Array.isArray(parsed.models)) return undefined;
-      return parsed.models;
+      if (typeof parsed.fetchedAt !== "number") return undefined;
+      return parsed;
     } catch {
       return undefined;
     }
@@ -352,9 +358,16 @@ export function createRegistry(backend: Backend): ModelRegistry {
     // the static snapshot so checked-in capability metadata survives; the
     // cache fills in last-known context/output and adds discovered ids.
     const cached = await loadCache(cacheFile);
-    if (cached && cached.length > 0) {
-      applyCache(cached);
-      logger.debug(`model cache loaded (${cached.length} models)`);
+    if (cached && cached.models.length > 0) {
+      applyCache(cached.models);
+      logger.debug(`model cache loaded (${cached.models.length} models)`);
+      // `fetchedAt` exists so a restart inside the TTL does not re-download
+      // discovery plus the multi-megabyte catalog for an answer it already has.
+      const age = Math.floor(Date.now() / 1000) - cached.fetchedAt;
+      if (opts.maxCacheAgeSeconds !== undefined && age >= 0 && age < opts.maxCacheAgeSeconds) {
+        logger.debug(`model cache is ${age}s old, skipping refresh`);
+        return;
+      }
     }
 
     // 2. Live discovery + catalog metadata.

@@ -114,3 +114,38 @@ describe("catalog refresh drives context windows", () => {
     }
   });
 });
+
+describe("cache freshness", () => {
+  it("skips the network while the cache is younger than the TTL", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    const cacheFile = `/tmp/registry-fresh-${Date.now()}.json`;
+    await writeFile(
+      cacheFile,
+      JSON.stringify({
+        version: 1,
+        backend: "free",
+        fetchedAt: Math.floor(Date.now() / 1000),
+        models: [{ id: "cached-only-model", format: "oa-compat", contextWindow: 1234, maxOutput: 10 }],
+      }),
+    );
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const r = createRegistry("free");
+      await r.refresh({
+        baseUrl: "https://example.invalid/v1",
+        cacheFile,
+        logger: { debug() {}, info() {}, warn() {}, error() {} } as never,
+        maxCacheAgeSeconds: 86_400,
+      });
+      expect(calls).toBe(0);
+      expect(r.resolveModel("cached-only-model")?.entry.contextWindow).toBe(1234);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
