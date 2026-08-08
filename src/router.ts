@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { extractApiKey } from "./auth.js";
+import { clearAuth, extractApiKey } from "./auth.js";
 import { applyReasoningEffort, backfillReasoningContent, stripUnsupported } from "./capability.js";
 import type { Config } from "./config.js";
 import { ProxyError } from "./errors.js";
@@ -106,11 +106,7 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
   }
   const stickyId = c.req.header("x-claude-code-session-id") ?? "";
   provider.modifyHeaders(headers, apiKey ?? "", stickyId);
-  if (apiKey === undefined) {
-    headers.delete("x-api-key");
-    headers.delete("authorization");
-    headers.delete("x-goog-api-key");
-  }
+  if (apiKey === undefined) clearAuth(headers);
 
   const url = provider.modifyUrl(config.baseUrl, isStream);
 
@@ -214,11 +210,7 @@ export async function handleCountTokens(c: Context, deps: RouterDeps): Promise<R
       supports1m: resolved.entry.contextWindow >= 1_000_000 || resolved.contextVariant === "1m",
     });
     provider.modifyHeaders(headers, apiKey ?? "", "");
-    if (apiKey === undefined) {
-      headers.delete("x-api-key");
-      headers.delete("authorization");
-      headers.delete("x-goog-api-key");
-    }
+    if (apiKey === undefined) clearAuth(headers);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
     try {
