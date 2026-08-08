@@ -63,3 +63,22 @@ describe("createApp", () => {
     expect(res.status).toBe(404);
   });
 });
+describe("pumpStream error handling", () => {
+  it("does not append message_stop after an oa-compat error envelope", async () => {
+    const { pumpStream } = await import("../src/stream.js");
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"error":{"message":"boom"}}\n\n'));
+        c.close();
+      },
+    });
+    const out = pumpStream({
+      upstream: new Response(body),
+      upstreamFormat: "oa-compat",
+      clientFormat: "anthropic",
+    });
+    const text = await new Response(out).text();
+    expect(text).toContain("boom");
+    expect(text).not.toContain("message_stop");
+  });
+});

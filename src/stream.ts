@@ -73,7 +73,9 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
         if (ev === "message_stop") sawMessageStop = true;
         // Mid-stream upstream error: forward verbatim and suppress the synthetic
         // `message_stop` so we close the stream as the spec requires (§9.2.3).
-        if (ev === "error") sawError = true;
+        // oa-compat upstreams have no event line — they just send an error
+        // envelope as data, so the payload has to be inspected too.
+        if (ev === "error" || isErrorPayload(block)) sawError = true;
         if (upstreamFormat === "oa-compat" && block.trim() === "data: [DONE]") return;
         usageParser.parse(block);
         if (sameFormat) {
@@ -143,6 +145,20 @@ function createSseSplitter(): { push: (text: string) => string[]; flush: () => s
       return blocks;
     },
   };
+}
+
+/** True when an SSE block's data payload is an error envelope. */
+function isErrorPayload(block: string): boolean {
+  const line = block.split("\n").find((l) => l.startsWith("data:"));
+  if (!line) return false;
+  const payload = line.slice(5).trim();
+  if (payload === "[DONE]" || !payload.startsWith("{")) return false;
+  try {
+    const json = JSON.parse(payload) as { error?: unknown };
+    return json?.error !== undefined && json.error !== null;
+  } catch {
+    return false;
+  }
 }
 
 function eventType(block: string): string {
