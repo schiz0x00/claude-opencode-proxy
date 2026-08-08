@@ -8,6 +8,20 @@ import type { Format } from "./translate/types.js";
 
 export type { Capabilities } from "./types.js";
 
+/**
+ * Reasoning knobs a model accepts, read from the catalog's `reasoning_options`
+ * (spec §11.1). Providers disagree on the wire field, so we record what the
+ * catalog advertises and let the request path pick one.
+ */
+export interface ReasoningOptions {
+  /** Accepted `reasoning_effort` values, in catalog order (weakest first). */
+  effort?: string[];
+  /** Model takes a plain on/off reasoning toggle. */
+  toggle?: boolean;
+  /** Model takes an explicit thinking-token budget. */
+  budgetTokens?: { min?: number; max?: number };
+}
+
 export interface ModelEntry {
   id: string;
   format: Format;
@@ -16,6 +30,7 @@ export interface ModelEntry {
   displayName?: string;
   capabilities: Capabilities;
   provider?: string;
+  reasoningOptions?: ReasoningOptions;
 }
 
 export interface ResolvedModel {
@@ -46,6 +61,13 @@ export interface ModelRegistry {
 
 const ALIAS_PREFIX = "claude-ocx-";
 const CATALOG_URL = "https://models.opencode.ai/catalog.json";
+
+/** Catalog provider key per backend (`providers.<id>.models`). */
+const CATALOG_PROVIDER: Record<Backend, string> = {
+  zen: "opencode",
+  free: "opencode",
+  go: "opencode-go",
+};
 const CACHE_VERSION = 1;
 
 /** Conservative defaults for unknown models (spec §11.1). */
@@ -77,6 +99,7 @@ interface CacheFile {
     displayName?: string;
     provider?: string;
     capabilities?: Partial<Capabilities>;
+    reasoningOptions?: ReasoningOptions;
   }>;
 }
 
@@ -84,6 +107,7 @@ interface CatalogMeta {
   contextWindow?: number;
   maxOutput?: number;
   capabilities?: Partial<Capabilities>;
+  reasoningOptions?: ReasoningOptions;
 }
 
 /** Expand `~` in a cache path. */
@@ -171,6 +195,7 @@ export function createRegistry(backend: Backend): ModelRegistry {
         displayName: e.displayName,
         provider: e.provider,
         capabilities: e.capabilities,
+        reasoningOptions: e.reasoningOptions,
       })),
     };
     const file = expandHome(cacheFile);
@@ -184,12 +209,16 @@ export function createRegistry(backend: Backend): ModelRegistry {
     await rename(tmp, file);
   }
 
-  /** Fetch live model ids from `{base}/v1/models` (bare ids, spec §10.4). */
+  /**
+   * Fetch live model ids from `{base}/models` (bare ids, spec §10.4). The
+   * base URL already carries `/v1`, so appending it again 404s and silently
+   * disables discovery *and* the catalog merge that rides along with it.
+   */
   async function fetchLiveIds(baseUrl: string, timeoutMs: number): Promise<string[]> {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(`${baseUrl}/v1/models`, { signal: controller.signal });
+      const res = await fetch(`${baseUrl}/models`, { signal: controller.signal });
       if (!res.ok) return [];
       const json = (await res.json()) as { data?: Array<{ id?: string }> };
       return (json.data ?? []).map((m) => m.id).filter((id): id is string => typeof id === "string");
@@ -208,12 +237,22 @@ export function createRegistry(backend: Backend): ModelRegistry {
     try {
       const res = await fetch(CATALOG_URL, { signal: controller.signal });
       if (!res.ok) return out;
-      const json = (await res.json()) as { models?: Record<string, unknown> };
-      // The catalog nests entries under `models`, keyed `<provider>/<model>`
-      // (e.g. "deepseek/deepseek-v4-pro"). Map to the bare id used by live
-      // discovery and the static snapshot.
+      const json = (await res.json()) as {
+        models?: Record<string, unknown>;
+        providers?: Record<string, { models?: Record<string, unknown> }>;
+      };
+      // Top-level `models` is keyed `<provider>/<model>` (e.g.
+      // "deepseek/deepseek-v4-pro"). Map to the bare id used by live discovery
+      // and the static snapshot.
       for (const [key, value] of Object.entries(json.models ?? {})) {
         const id = key.includes("/") ? key.slice(key.indexOf("/") + 1) : key;
+        out.set(id, catalogMeta(value));
+      }
+      // The OpenCode-served models are absent from that top-level map — they
+      // live only under `providers.<id>.models`, keyed by bare id. Read those
+      // last so the provider's own metadata wins for the ids we actually route.
+      const providerModels = json.providers?.[CATALOG_PROVIDER[backend]]?.models ?? {};
+      for (const [id, value] of Object.entries(providerModels)) {
         out.set(id, catalogMeta(value));
       }
     } catch {
@@ -222,6 +261,32 @@ export function createRegistry(backend: Backend): ModelRegistry {
       clearTimeout(t);
     }
     return out;
+  }
+
+  /**
+   * Read the catalog's `reasoning_options` array — a list of the knobs the
+   * model accepts, e.g. `[{type:"toggle"},{type:"effort",values:[...]}]` or
+   * `[{type:"budget_tokens",min:1024}]`. Returns undefined when the model
+   * advertises none (the array is present-but-empty for non-reasoning models).
+   */
+  function parseReasoningOptions(raw: unknown): ReasoningOptions | undefined {
+    if (!Array.isArray(raw) || raw.length === 0) return undefined;
+    const out: ReasoningOptions = {};
+    for (const opt of raw) {
+      if (!opt || typeof opt !== "object") continue;
+      const o = opt as Record<string, any>;
+      if (o.type === "toggle") out.toggle = true;
+      else if (o.type === "effort" && Array.isArray(o.values)) {
+        const values = o.values.filter((v: unknown): v is string => typeof v === "string");
+        if (values.length > 0) out.effort = values;
+      } else if (o.type === "budget_tokens") {
+        out.budgetTokens = {
+          ...(typeof o.min === "number" ? { min: o.min } : {}),
+          ...(typeof o.max === "number" ? { max: o.max } : {}),
+        };
+      }
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
   }
 
   /** Extract capability metadata from a catalog entry (spec §11.1). */
@@ -233,6 +298,7 @@ export function createRegistry(backend: Backend): ModelRegistry {
     return {
       contextWindow: limit.context,
       maxOutput: limit.output,
+      reasoningOptions: parseReasoningOptions(v.reasoning_options),
       capabilities: {
         reasoning: v.reasoning === true,
         tools: v.tool_call !== false,
@@ -295,6 +361,7 @@ export function createRegistry(backend: Backend): ModelRegistry {
           maxOutput: cat?.maxOutput ?? existing?.maxOutput ?? 64_000,
           displayName: existing?.displayName,
           provider: existing?.provider,
+          reasoningOptions: cat?.reasoningOptions ?? existing?.reasoningOptions,
           // Catalog caps win where known; otherwise keep the existing
           // (static/cached) capabilities instead of resetting to defaults.
           capabilities: { ...(existing?.capabilities ?? {}), ...(cat?.capabilities ?? {}) },
@@ -306,6 +373,22 @@ export function createRegistry(backend: Backend): ModelRegistry {
       }
       mergeEntries(merged);
       logger.info(`model discovery: ${liveIds.length} live ids, ${entries.size} total`);
+    } else if (catalog.size > 0) {
+      // Discovery unavailable (offline, 404, auth): still take catalog
+      // metadata for the ids we already know, so reasoning options and
+      // context limits are not lost with it.
+      for (const [id, e] of entries) {
+        const cat = catalog.get(id);
+        if (!cat) continue;
+        entries.set(id, {
+          ...e,
+          contextWindow: cat.contextWindow ?? e.contextWindow,
+          maxOutput: cat.maxOutput ?? e.maxOutput,
+          reasoningOptions: cat.reasoningOptions ?? e.reasoningOptions,
+          capabilities: { ...e.capabilities, ...(cat.capabilities ?? {}) },
+        });
+      }
+      logger.debug(`catalog merge only: ${entries.size} models`);
     }
 
     // 3. Persist.

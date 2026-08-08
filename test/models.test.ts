@@ -99,7 +99,7 @@ describe("registry refresh", () => {
     // Point at a mock upstream that serves a live model list.
     const { createServer } = await import("node:http");
     const server = createServer((req, res) => {
-      if (req.url?.includes("/v1/models")) {
+      if (req.url === "/v1/models") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ data: [{ id: "brand-new-live-model" }, { id: "deepseek-v4-flash-free" }] }));
       } else {
@@ -123,7 +123,7 @@ describe("registry refresh", () => {
     const cacheFile = await tempCache();
     const { createServer } = await import("node:http");
     const server = createServer((req, res) => {
-      if (req.url?.includes("/v1/models")) {
+      if (req.url === "/v1/models") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ data: [{ id: "deepseek-v4-flash-free" }] }));
       } else {

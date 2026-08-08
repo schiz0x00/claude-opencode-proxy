@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { extractApiKey } from "./auth.js";
-import { stripUnsupported } from "./capability.js";
+import { applyReasoningEffort, stripUnsupported } from "./capability.js";
 import type { Config } from "./config.js";
 import { ProxyError } from "./errors.js";
 import type { Logger } from "./logging.js";
@@ -60,6 +60,10 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
     supports1m: entry.contextWindow >= 1_000_000 || resolved.contextVariant === "1m",
   });
 
+  // Captured before stripping: the anthropic `thinking` block is the only
+  // place Claude Code states reasoning effort, and it is translated away.
+  const thinking = body.thinking;
+
   // Strip capabilities the model doesn't support (spec §11.2) before
   // translating, so unsupported fields never reach the backend.
   if (config.stripUnsupported) {
@@ -72,6 +76,11 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
   let upstreamBody: any;
   try {
     upstreamBody = createBodyConverter("anthropic", format)(body);
+    // Anthropic upstreams already speak `thinking` natively (identity
+    // conversion); everything else needs the catalog-advertised knob.
+    if (format !== "anthropic" && entry.capabilities.reasoning) {
+      applyReasoningEffort(upstreamBody, thinking, entry.reasoningOptions);
+    }
     upstreamBody = provider.modifyBody(upstreamBody);
   } catch (err) {
     throw new ProxyError(501, (err as Error).message);
