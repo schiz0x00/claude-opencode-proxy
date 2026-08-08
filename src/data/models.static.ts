@@ -1,4 +1,4 @@
-import type { Backend } from "../types.js";
+import type { Backend, Capabilities } from "../types.js";
 import type { Format } from "../translate/types.js";
 
 /**
@@ -14,6 +14,8 @@ export interface StaticModelEntry {
   maxOutput: number;
   displayName?: string;
   provider?: string;
+  /** Verified capability overrides; unset fields fall back to defaults. */
+  capabilities?: Partial<Capabilities>;
 }
 
 const DEFAULT_CONTEXT = 200_000;
@@ -100,6 +102,39 @@ const DISPLAY: Record<string, string> = {
   "nemotron-3-ultra-free": "Nemotron 3 Ultra (Free)",
 };
 
+/**
+ * Verified capability overrides for models whose conservative defaults would
+ * otherwise strip supported features (spec §11.1). Values mirror the paid
+ * sibling's OpenCode catalog entry (`models.opencode.ai/catalog.json`).
+ */
+const CAPS: Record<string, Partial<Capabilities>> = {
+  // deepseek/deepseek-v4-flash (catalog): reasoning, tool_call,
+  // structured_output. The free lane shares the V4 Flash feature set
+  // (incl. multi-level reasoning), so thinking / output_config / cache_control
+  // must pass through instead of being stripped.
+  "deepseek-v4-flash-free": {
+    reasoning: true,
+    structuredOutput: true,
+    promptCaching: true,
+  },
+  // xiaomi/mimo-v2.5 (catalog): reasoning, tool_call, multimodal
+  // (input: text/image/audio/video).
+  "mimo-v2.5-free": {
+    reasoning: true,
+    vision: true,
+    audio: true,
+    fileCompatibility: true,
+  },
+  // poolside/laguna-s-2.1 (catalog): reasoning, tool_call; text only.
+  "laguna-s-2.1-free": {
+    reasoning: true,
+  },
+  // meituan/longcat-2.0 (catalog): reasoning, tool_call; text only.
+  "longcat-2.0-free": {
+    reasoning: true,
+  },
+};
+
 function m(id: string, format: Format, provider?: string): StaticModelEntry {
   const [contextWindow, maxOutput] = CTX[id] ?? [DEFAULT_CONTEXT, DEFAULT_OUTPUT];
   return {
@@ -109,6 +144,7 @@ function m(id: string, format: Format, provider?: string): StaticModelEntry {
     maxOutput,
     displayName: DISPLAY[id],
     provider,
+    capabilities: CAPS[id],
   };
 }
 

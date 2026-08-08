@@ -1,5 +1,5 @@
 import type { Logger } from "./logging.js";
-import type { Capabilities } from "./modelRegistry.js";
+import type { Capabilities } from "./types.js";
 
 /**
  * Strip/downgrade unsupported capabilities from an Anthropic request body

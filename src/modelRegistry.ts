@@ -3,22 +3,10 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { STATIC_MODELS, type StaticModelEntry } from "./data/models.static.js";
 import type { Logger } from "./logging.js";
-import type { Backend } from "./types.js";
+import type { Backend, Capabilities } from "./types.js";
 import type { Format } from "./translate/types.js";
 
-export interface Capabilities {
-  tools: boolean;
-  vision: boolean;
-  reasoning: boolean;
-  streaming: boolean;
-  promptCaching: boolean;
-  structuredOutput: boolean;
-  fileCompatibility: boolean;
-  computerUse: boolean;
-  audio: boolean;
-  webSearch: boolean;
-  embeddings: boolean;
-}
+export type { Capabilities } from "./types.js";
 
 export interface ModelEntry {
   id: string;
@@ -88,6 +76,7 @@ interface CacheFile {
     maxOutput: number;
     displayName?: string;
     provider?: string;
+    capabilities?: Partial<Capabilities>;
   }>;
 }
 
@@ -123,7 +112,7 @@ export function createRegistry(backend: Backend): ModelRegistry {
       maxOutput: s.maxOutput,
       displayName: s.displayName,
       provider: s.provider,
-      capabilities: defaultCapabilities(),
+      capabilities: { ...defaultCapabilities(), ...(s.capabilities ?? {}) },
     };
   }
 
@@ -181,6 +170,7 @@ export function createRegistry(backend: Backend): ModelRegistry {
         maxOutput: e.maxOutput,
         displayName: e.displayName,
         provider: e.provider,
+        capabilities: e.capabilities,
       })),
     };
     const file = expandHome(cacheFile);
@@ -218,9 +208,11 @@ export function createRegistry(backend: Backend): ModelRegistry {
     try {
       const res = await fetch(CATALOG_URL, { signal: controller.signal });
       if (!res.ok) return out;
-      const json = (await res.json()) as Record<string, unknown>;
-      // Catalog entries are provider-prefixed (e.g. "deepseek/deepseek-v4-pro").
-      for (const [key, value] of Object.entries(json)) {
+      const json = (await res.json()) as { models?: Record<string, unknown> };
+      // The catalog nests entries under `models`, keyed `<provider>/<model>`
+      // (e.g. "deepseek/deepseek-v4-pro"). Map to the bare id used by live
+      // discovery and the static snapshot.
+      for (const [key, value] of Object.entries(json.models ?? {})) {
         const id = key.includes("/") ? key.slice(key.indexOf("/") + 1) : key;
         out.set(id, catalogMeta(value));
       }
@@ -272,10 +264,12 @@ export function createRegistry(backend: Backend): ModelRegistry {
     const { baseUrl, cacheFile, logger } = opts;
     const timeoutMs = opts.timeoutMs ?? 3000;
 
-    // 1. Cache is the fastest baseline (offline startup works).
+    // 1. Cache is the fastest baseline (offline startup works). Merge it over
+    // the static snapshot so checked-in capability metadata survives; the
+    // cache fills in last-known context/output and adds discovered ids.
     const cached = await loadCache(cacheFile);
     if (cached && cached.length > 0) {
-      mergeEntries(cached);
+      applyCache(cached);
       logger.debug(`model cache loaded (${cached.length} models)`);
     }
 
@@ -301,7 +295,9 @@ export function createRegistry(backend: Backend): ModelRegistry {
           maxOutput: cat?.maxOutput ?? existing?.maxOutput ?? 64_000,
           displayName: existing?.displayName,
           provider: existing?.provider,
-          capabilities: cat?.capabilities,
+          // Catalog caps win where known; otherwise keep the existing
+          // (static/cached) capabilities instead of resetting to defaults.
+          capabilities: { ...(existing?.capabilities ?? {}), ...(cat?.capabilities ?? {}) },
         });
       }
       // Static-only models not seen live are kept (docs may lag the API).
@@ -321,6 +317,29 @@ export function createRegistry(backend: Backend): ModelRegistry {
     // Every currently-known free/undocumented model routes through
     // chat/completions; chat/completions is also the safest default.
     return "oa-compat";
+  }
+
+  /**
+   * Merge cached models over the current (static) entries. Static entries
+   * keep their checked-in capability metadata; the cache supplies last-known
+   * context/output and adds discovered ids not present in the snapshot.
+   */
+  function applyCache(cached: CacheFile["models"]): void {
+    for (const c of cached) {
+      const existing = entries.get(c.id);
+      if (existing) {
+        entries.set(c.id, {
+          ...existing,
+          ...c,
+          capabilities: { ...existing.capabilities, ...(c.capabilities ?? {}) },
+        });
+      } else {
+        entries.set(c.id, {
+          ...c,
+          capabilities: { ...defaultCapabilities(), ...(c.capabilities ?? {}) },
+        });
+      }
+    }
   }
 
   function mergeEntries(models: Array<Omit<ModelEntry, "capabilities"> & { capabilities?: Partial<Capabilities> }>): void {

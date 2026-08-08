@@ -34,3 +34,32 @@ describe("createRegistry", () => {
     expect(r.resolveModel("does-not-exist")).toBeUndefined();
   });
 });
+
+describe("static capability metadata", () => {
+  it("applies verified overrides for deepseek-v4-flash-free", () => {
+    const r = createRegistry("free");
+    const m = r.resolveModel("deepseek-v4-flash-free");
+    // These were previously stripped (wrong warnings): thinking, output_config,
+    // cache_control. The model shares the V4 Flash feature set.
+    expect(m?.entry.capabilities.reasoning).toBe(true);
+    expect(m?.entry.capabilities.structuredOutput).toBe(true);
+    expect(m?.entry.capabilities.promptCaching).toBe(true);
+    expect(m?.entry.capabilities.tools).toBe(true);
+  });
+
+  it("applies catalog-derived overrides for mimo-v2.5-free", () => {
+    const r = createRegistry("free");
+    const m = r.resolveModel("mimo-v2.5-free");
+    expect(m?.entry.capabilities.reasoning).toBe(true);
+    expect(m?.entry.capabilities.vision).toBe(true);
+    expect(m?.entry.capabilities.audio).toBe(true);
+  });
+
+  it("keeps conservative defaults for unverified free models", () => {
+    const r = createRegistry("free");
+    const m = r.resolveModel("north-mini-code-free");
+    expect(m?.entry.capabilities.reasoning).toBe(false);
+    expect(m?.entry.capabilities.structuredOutput).toBe(false);
+    expect(m?.entry.capabilities.promptCaching).toBe(false);
+  });
+});

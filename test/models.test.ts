@@ -117,4 +117,56 @@ describe("registry refresh", () => {
       server.close();
     }
   });
+
+  it("keeps static capabilities when a live id has no catalog entry", async () => {
+    const r = createRegistry("free");
+    const cacheFile = await tempCache();
+    const { createServer } = await import("node:http");
+    const server = createServer((req, res) => {
+      if (req.url?.includes("/v1/models")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "deepseek-v4-flash-free" }] }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      await r.refresh({ baseUrl: `http://127.0.0.1:${port}/v1`, cacheFile, logger, timeoutMs: 1000 });
+      // deepseek-v4-flash-free is not in the catalog, so the live merge must
+      // fall back to the static capabilities instead of resetting to defaults.
+      const m = r.resolveModel("deepseek-v4-flash-free");
+      expect(m?.entry.capabilities.reasoning).toBe(true);
+      expect(m?.entry.capabilities.structuredOutput).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("persists capabilities in the cache file", async () => {
+    const r = createRegistry("free");
+    const cacheFile = await tempCache();
+    await r.refresh({ baseUrl: "http://127.0.0.1:1", cacheFile, logger, timeoutMs: 100 });
+    const parsed = JSON.parse(await readFile(cacheFile, "utf8"));
+    const row = parsed.models.find((m: { id: string }) => m.id === "deepseek-v4-flash-free");
+    expect(row?.capabilities?.reasoning).toBe(true);
+    expect(row?.capabilities?.structuredOutput).toBe(true);
+    expect(row?.capabilities?.promptCaching).toBe(true);
+  });
+
+  it("restores capabilities from the cache on offline startup", async () => {
+    const r = createRegistry("free");
+    const cacheFile = await tempCache();
+    await r.refresh({ baseUrl: "http://127.0.0.1:1", cacheFile, logger, timeoutMs: 100 });
+
+    // Fresh registry, upstream unreachable: capabilities come from the cache.
+    const r2 = createRegistry("free");
+    await r2.refresh({ baseUrl: "http://127.0.0.1:1", cacheFile, logger, timeoutMs: 100 });
+    const m = r2.resolveModel("deepseek-v4-flash-free");
+    expect(m?.entry.capabilities.reasoning).toBe(true);
+    expect(m?.entry.capabilities.structuredOutput).toBe(true);
+    expect(m?.entry.capabilities.promptCaching).toBe(true);
+  });
 });
