@@ -72,8 +72,9 @@ describe("catalog refresh drives context windows", () => {
           models: {
             // Same model, free lane: separately capped. The static snapshot has
             // no entry, so this is the only source of truth.
-            "deepseek-v4-flash-free": { limit: { context: 200_000, output: 128_000 } },
-            "longcat-2.0-free": { limit: { context: 1_000_000, output: 131_072 } },
+            "deepseek-v4-flash-free": { limit: { context: 200_000, output: 128_000 }, cost: { input: 0, output: 0 } },
+            "longcat-2.0-free": { limit: { context: 1_000_000, output: 131_072 }, cost: { input: 0, output: 0 } },
+            "claude-opus-5": { limit: { context: 1_000_000, output: 128_000 }, cost: { input: 5, output: 25 } },
           },
         },
       },
@@ -84,7 +85,7 @@ describe("catalog refresh drives context windows", () => {
         JSON.stringify(
           String(url).includes("catalog.json")
             ? catalog
-            : { data: [{ id: "deepseek-v4-flash-free" }, { id: "longcat-2.0-free" }] },
+            : { data: [{ id: "deepseek-v4-flash-free" }, { id: "longcat-2.0-free" }, { id: "claude-opus-5" }] },
         ),
         { status: 200 },
       )) as typeof fetch;
@@ -96,6 +97,9 @@ describe("catalog refresh drives context windows", () => {
         logger: { debug() {}, info() {}, warn() {}, error() {} } as never,
       });
       expect(r.resolveModel("deepseek-v4-flash-free")?.entry.contextWindow).toBe(200_000);
+      // A paid model returned by the shared Zen /models endpoint is not
+      // servable on the free lane, which sends no key.
+      expect(r.resolveModel("claude-opus-5")).toBeUndefined();
       expect(r.resolveModel("longcat-2.0-free")?.entry.contextWindow).toBe(1_000_000);
     } finally {
       globalThis.fetch = original;

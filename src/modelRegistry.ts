@@ -104,6 +104,8 @@ interface CacheFile {
 }
 
 interface CatalogMeta {
+  /** Catalog prices this model at zero, i.e. it is served on the free lane. */
+  free?: boolean;
   contextWindow?: number;
   maxOutput?: number;
   capabilities?: Partial<Capabilities>;
@@ -295,7 +297,9 @@ export function createRegistry(backend: Backend): ModelRegistry {
     const limit = (v.limit ?? {}) as Record<string, any>;
     const modalities = (v.modalities ?? {}) as Record<string, any>;
     const input = Array.isArray(modalities.input) ? modalities.input : [];
+    const cost = (v.cost ?? {}) as Record<string, any>;
     return {
+      free: cost.input === 0 && cost.output === 0,
       contextWindow: limit.context,
       maxOutput: limit.output,
       reasoningOptions: parseReasoningOptions(v.reasoning_options),
@@ -348,10 +352,22 @@ export function createRegistry(backend: Backend): ModelRegistry {
       // fall through with whatever we have
     }
 
-    if (liveIds.length > 0) {
+    // The free backend shares the Zen base URL, so discovery hands back every
+    // paid model too. Serving those would put ids in the client's picker that
+    // the free lane answers with a 401, since it sends no key at all — keep
+    // only what the catalog prices at zero.
+    const servable =
+      backend === "free"
+        // Drop only what the catalog positively prices as paid. An id the
+        // catalog has not caught up with yet stays — hiding a model we cannot
+        // classify is worse than listing one that might 401.
+        ? liveIds.filter((id) => catalog.get(id)?.free !== false)
+        : liveIds;
+
+    if (servable.length > 0) {
       // Live ids win: keep existing metadata where known, else defaults.
       const merged: Array<Omit<ModelEntry, "capabilities"> & { capabilities?: Partial<Capabilities> }> = [];
-      for (const id of liveIds) {
+      for (const id of servable) {
         const existing = entries.get(id);
         const cat = catalog.get(id);
         merged.push({
@@ -367,12 +383,16 @@ export function createRegistry(backend: Backend): ModelRegistry {
           capabilities: { ...(existing?.capabilities ?? {}), ...(cat?.capabilities ?? {}) },
         });
       }
-      // Static-only models not seen live are kept (docs may lag the API).
+      // Snapshot models not seen live are kept (docs may lag the API). Only
+      // the snapshot — carrying over everything currently in `entries` would
+      // resurrect ids a stale cache added, including ones discovery just
+      // filtered out.
+      const snapshot = new Set(STATIC_MODELS[backend].map((sm) => sm.id));
       for (const [id, e] of entries) {
-        if (!merged.some((m) => m.id === id)) merged.push(e);
+        if (snapshot.has(id) && !merged.some((m) => m.id === id)) merged.push(e);
       }
       mergeEntries(merged);
-      logger.info(`model discovery: ${liveIds.length} live ids, ${entries.size} total`);
+      logger.info(`model discovery: ${liveIds.length} live ids, ${servable.length} servable, ${entries.size} total`);
     } else if (catalog.size > 0) {
       // Discovery unavailable (offline, 404, auth): still take catalog
       // metadata for the ids we already know, so reasoning options and
