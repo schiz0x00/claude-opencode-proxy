@@ -140,10 +140,13 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
   if (!upstream.ok) {
     const bodyText = await upstream.text();
     logger.warn(`upstream ${upstream.status} for model ${modelId}`);
-    return new Response(bodyText, {
-      status: upstream.status,
-      headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
-    });
+    const errorHeaders: Record<string, string> = {
+      "content-type": upstream.headers.get("content-type") ?? "application/json",
+    };
+    // Claude Code waits out a 429 based on this; dropping it makes it guess.
+    const retryAfter = upstream.headers.get("retry-after");
+    if (retryAfter) errorHeaders["retry-after"] = retryAfter;
+    return new Response(bodyText, { status: upstream.status, headers: errorHeaders });
   }
 
   if (isStream) {
@@ -334,8 +337,13 @@ async function fetchWithRetry(
       });
       if (res.ok || (res.status < 500 && res.status !== 429)) return res;
       // Transient upstream failure: drain the body so the socket can be reused.
-      await res.text().catch(() => undefined);
-      if (attempt >= maxRetries) return res;
+      const drained = await res.text().catch(() => "");
+      // Out of attempts: hand back the text we drained. Returning `res` itself
+      // would give the caller a consumed body, and reading it again throws —
+      // turning a 429 the client knows how to back off from into a 500.
+      if (attempt >= maxRetries) {
+        return new Response(drained, { status: res.status, headers: res.headers });
+      }
       logger.warn(`upstream ${res.status}, retrying (${attempt + 1}/${maxRetries})`);
     } catch (err) {
       lastErr = err as Error;
