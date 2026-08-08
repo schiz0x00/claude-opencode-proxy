@@ -386,3 +386,54 @@ describe("thinking mode round trip", () => {
     expect(body.messages[1].reasoning_content).toBe("ponder");
   });
 });
+
+describe("streamed text blocks", () => {
+  it("keeps one text block open across deltas instead of one per token", () => {
+    const to = createStreamPartConverter("oa-compat", "anthropic")!;
+    const chunk = (delta: unknown, finish: string | null = null) =>
+      to(
+        `data: ${JSON.stringify({
+          id: "c",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "m",
+          choices: [{ index: 0, delta, finish_reason: finish }],
+        })}`,
+      );
+
+    const out = [
+      chunk({ content: "Hi" }),
+      chunk({ content: " there" }),
+      chunk({ content: "!" }),
+      chunk({}, "stop"),
+    ].join("\n\n");
+
+    const starts = out.match(/"type":"content_block_start"/g) ?? [];
+    const stops = out.match(/"type":"content_block_stop"/g) ?? [];
+    const deltas = out.match(/"type":"text_delta"/g) ?? [];
+    expect(starts).toHaveLength(1); // one block…
+    expect(deltas).toHaveLength(3); // …carrying every token…
+    expect(stops).toHaveLength(1); // …closed once, at the finish.
+    // Every delta targets that same block index.
+    expect(out.match(/"content_block_delta","index":(\d+)/g)?.every((m) => m.endsWith(":0"))).toBe(true);
+  });
+
+  it("closes the text block before opening a tool block", () => {
+    const to = createStreamPartConverter("oa-compat", "anthropic")!;
+    const chunk = (delta: unknown) =>
+      to(
+        `data: ${JSON.stringify({
+          id: "c",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "m",
+          choices: [{ index: 0, delta, finish_reason: null }],
+        })}`,
+      );
+    chunk({ content: "let me look" });
+    const out = chunk({
+      tool_calls: [{ index: 0, id: "t1", type: "function", function: { name: "Read", arguments: "" } }],
+    });
+    expect(out.indexOf("content_block_stop")).toBeLessThan(out.indexOf('"type":"tool_use"'));
+  });
+});

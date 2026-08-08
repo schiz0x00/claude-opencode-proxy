@@ -523,6 +523,7 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
   let started = false;
   let blockIndex = 0;
   let toolBlockIndex = -1;
+  let textBlockIndex = -1;
   let thinkingBlockIndex = -1;
   let sawFinish = false;
   let sawUsage = false;
@@ -586,26 +587,35 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
         events.push(sse("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
         toolBlockIndex = -1;
       }
-      events.push(
-        sse("content_block_start", {
-          type: "content_block_start",
-          index: blockIndex,
-          content_block: { type: "text", text: "" },
-        }),
-      );
+      // One text block spanning every consecutive text delta. Opening and
+      // closing a block per delta is legal SSE but renders as one content
+      // block per token, which the client lays out as separate lines.
+      if (textBlockIndex === -1) {
+        textBlockIndex = blockIndex++;
+        events.push(
+          sse("content_block_start", {
+            type: "content_block_start",
+            index: textBlockIndex,
+            content_block: { type: "text", text: "" },
+          }),
+        );
+      }
       events.push(
         sse("content_block_delta", {
           type: "content_block_delta",
-          index: blockIndex,
+          index: textBlockIndex,
           delta: { type: "text_delta", text: delta.content },
         }),
       );
-      events.push(sse("content_block_stop", { type: "content_block_stop", index: blockIndex }));
-      blockIndex++;
     }
 
     for (const tc of delta?.tool_calls ?? []) {
       if (tc.function?.name) {
+        // A tool call ends the text block that preceded it.
+        if (textBlockIndex !== -1) {
+          events.push(sse("content_block_stop", { type: "content_block_stop", index: textBlockIndex }));
+          textBlockIndex = -1;
+        }
         events.push(
           sse("content_block_start", {
             type: "content_block_start",
@@ -638,6 +648,10 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
       if (toolBlockIndex !== -1) {
         events.push(sse("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
         toolBlockIndex = -1;
+      }
+      if (textBlockIndex !== -1) {
+        events.push(sse("content_block_stop", { type: "content_block_stop", index: textBlockIndex }));
+        textBlockIndex = -1;
       }
       events.push(
         sse("message_delta", {
