@@ -8,6 +8,9 @@ export interface CommonMessage {
   tool_call_id?: string; // role === "tool"
   tool_calls?: CommonToolCall[]; // role === "assistant"
   name?: string;
+  // Thinking-mode trace. Some oa-compat providers (deepseek et al.) reject a
+  // follow-up turn whose assistant message lost its `reasoning_content`.
+  reasoning_content?: string;
 }
 
 export type CommonContentPart =
@@ -52,7 +55,12 @@ export interface CommonResponse {
   choices: [
     {
       index: number;
-      message: { role: "assistant"; content?: string; tool_calls?: CommonToolCall[] };
+      message: {
+        role: "assistant";
+        content?: string;
+        tool_calls?: CommonToolCall[];
+        reasoning_content?: string;
+      };
       finish_reason: "stop" | "tool_calls" | "length" | "content_filter" | null;
     },
   ];
@@ -67,7 +75,12 @@ export interface CommonChunk {
   choices: [
     {
       index: number;
-      delta: { role?: "assistant"; content?: string; tool_calls?: CommonToolCall[] };
+      delta: {
+        role?: "assistant";
+        content?: string;
+        tool_calls?: CommonToolCall[];
+        reasoning_content?: string;
+      };
       finish_reason: "stop" | "tool_calls" | "length" | "content_filter" | null;
     },
   ];

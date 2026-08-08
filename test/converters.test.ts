@@ -338,3 +338,51 @@ describe("createStreamPartConverter", () => {
     expect(conv("data: [DONE]")).toBe("data: [DONE]");
   });
 });
+// ---------------------------------------------------------------------------
+// Thinking mode: reasoning_content must survive the round trip, or providers
+// reject the follow-up turn ("The `reasoning_content` in the thinking mode
+// must be passed back to the API").
+// ---------------------------------------------------------------------------
+
+describe("thinking mode round trip", () => {
+  it("streams reasoning_content out as thinking blocks and back in", () => {
+    const toAnthropic = createStreamPartConverter("oa-compat", "anthropic");
+    const out = [
+      toAnthropic!(
+        'data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"pon"},"finish_reason":null}]}',
+      ),
+      toAnthropic!(
+        'data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"der"},"finish_reason":null}]}',
+      ),
+      toAnthropic!(
+        'data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}',
+      ),
+    ].join("\n\n");
+
+    expect(out).toContain('"type":"thinking"');
+    expect(out).toContain('"thinking":"pon"');
+    expect(out).toContain('"thinking":"der"');
+    // Thinking block closes before the text block opens.
+    expect(out.indexOf("content_block_stop")).toBeLessThan(out.indexOf('"text_delta"'));
+
+    // Client echoes the assembled thinking block back on the next turn.
+    const toUpstream = createBodyConverter("anthropic", "oa-compat");
+    const body = toUpstream!({
+      model: "m",
+      max_tokens: 16,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "ponder", signature: "sig" },
+            { type: "text", text: "hi" },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "again" }] },
+      ],
+    }) as any;
+
+    expect(body.messages[1].reasoning_content).toBe("ponder");
+  });
+});

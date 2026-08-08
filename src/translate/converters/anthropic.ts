@@ -36,8 +36,15 @@ export interface AnthropicToolResultBlock {
   content: string | Array<{ type: "text"; text: string }>;
 }
 
+export interface AnthropicThinkingBlock {
+  type: "thinking";
+  thinking: string;
+  signature?: string;
+}
+
 export type AnthropicContentBlock =
   | AnthropicTextBlock
+  | AnthropicThinkingBlock
   | AnthropicImageBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock;
@@ -83,6 +90,8 @@ export interface AnthropicChunk {
   delta?: {
     type?: string;
     text?: string;
+    thinking?: string;
+    signature?: string;
     partial_json?: string;
     stop_reason?: string;
     stop_sequence?: string | null;
@@ -183,8 +192,12 @@ export function fromAnthropicRequest(body: AnthropicRequest): CommonRequest {
     const parts: CommonContentPart[] = [];
     const toolCalls: CommonToolCall[] = [];
     const toolResults: Array<{ tool_call_id: string; content: string }> = [];
+    const thinking: string[] = [];
     for (const block of m.content ?? []) {
       switch (block.type) {
+        case "thinking":
+          if (block.thinking) thinking.push(block.thinking);
+          break;
         case "text":
           parts.push({ type: "text", text: block.text });
           break;
@@ -203,11 +216,15 @@ export function fromAnthropicRequest(body: AnthropicRequest): CommonRequest {
           break;
       }
     }
+    // Thinking-mode providers require the assistant's reasoning trace to come
+    // back verbatim on the next turn, so carry it on the assistant message.
+    const reasoning = thinking.length > 0 ? { reasoning_content: thinking.join("") } : {};
     if (m.role === "assistant" && toolCalls.length > 0) {
       messages.push({
         role: "assistant",
         content: parts.length > 0 ? parts : undefined,
         tool_calls: toolCalls,
+        ...reasoning,
       });
     } else if (toolResults.length > 0) {
       for (const tr of toolResults) {
@@ -215,7 +232,7 @@ export function fromAnthropicRequest(body: AnthropicRequest): CommonRequest {
       }
       if (parts.length > 0) messages.push({ role: m.role, content: parts });
     } else {
-      messages.push({ role: m.role, content: parts.length > 0 ? parts : undefined });
+      messages.push({ role: m.role, content: parts.length > 0 ? parts : undefined, ...reasoning });
     }
   }
   return {
@@ -315,8 +332,10 @@ export function toAnthropicRequest(req: CommonRequest): AnthropicRequest {
 export function fromAnthropicResponse(resp: AnthropicResponse): CommonResponse {
   const textParts: string[] = [];
   const toolCalls: CommonToolCall[] = [];
+  const thinking: string[] = [];
   for (const block of resp.content ?? []) {
     if (block.type === "text") textParts.push(block.text);
+    else if (block.type === "thinking") thinking.push(block.thinking);
     else if (block.type === "tool_use") {
       toolCalls.push({
         id: block.id,
@@ -337,6 +356,7 @@ export function fromAnthropicResponse(resp: AnthropicResponse): CommonResponse {
           role: "assistant",
           content: textParts.length > 0 ? textParts.join("") : undefined,
           tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+          ...(thinking.length > 0 ? { reasoning_content: thinking.join("") } : {}),
         },
         finish_reason: mapStopReason(resp.stop_reason),
       },
@@ -357,6 +377,7 @@ export function fromAnthropicResponse(resp: AnthropicResponse): CommonResponse {
 export function toAnthropicResponse(resp: CommonResponse): AnthropicResponse {
   const content: AnthropicContentBlock[] = [];
   const msg = resp.choices[0].message;
+  if (msg.reasoning_content) content.push({ type: "thinking", thinking: msg.reasoning_content });
   if (msg.content) content.push({ type: "text", text: msg.content });
   for (const tc of msg.tool_calls ?? []) {
     content.push({
@@ -452,12 +473,14 @@ export function createFromAnthropicChunk(): (part: string) => string {
             tool_calls: [{ index: toolIndex, id: toolId, type: "function", function: { name: toolName, arguments: "" } }],
           });
         }
+        if (cb?.type === "thinking") return chunk({ reasoning_content: cb.thinking ?? "" });
         // text block start → empty content delta
         return chunk({ content: "" });
       }
       case "content_block_delta": {
         const d = data.delta;
         if (d?.type === "text_delta") return chunk({ content: d.text ?? "" });
+        if (d?.type === "thinking_delta") return chunk({ reasoning_content: d.thinking ?? "" });
         if (d?.type === "input_json_delta") {
           toolArgs += d.partial_json ?? "";
           return chunk({
@@ -500,6 +523,7 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
   let started = false;
   let blockIndex = 0;
   let toolBlockIndex = -1;
+  let thinkingBlockIndex = -1;
   let sawFinish = false;
   let sawUsage = false;
 
@@ -525,6 +549,38 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
 
     const choice = chunk.choices?.[0];
     const delta = choice?.delta;
+    if (delta?.reasoning_content) {
+      // One open thinking block spanning consecutive reasoning deltas; closed
+      // as soon as text/tool content or the finish arrives.
+      if (thinkingBlockIndex === -1) {
+        thinkingBlockIndex = blockIndex++;
+        events.push(
+          sse("content_block_start", {
+            type: "content_block_start",
+            index: thinkingBlockIndex,
+            content_block: { type: "thinking", thinking: "" },
+          }),
+        );
+      }
+      events.push(
+        sse("content_block_delta", {
+          type: "content_block_delta",
+          index: thinkingBlockIndex,
+          delta: { type: "thinking_delta", thinking: delta.reasoning_content },
+        }),
+      );
+    }
+    if (thinkingBlockIndex !== -1 && (delta?.content || delta?.tool_calls?.length || choice?.finish_reason)) {
+      events.push(
+        sse("content_block_delta", {
+          type: "content_block_delta",
+          index: thinkingBlockIndex,
+          delta: { type: "signature_delta", signature: "" },
+        }),
+      );
+      events.push(sse("content_block_stop", { type: "content_block_stop", index: thinkingBlockIndex }));
+      thinkingBlockIndex = -1;
+    }
     if (delta?.content) {
       if (toolBlockIndex !== -1) {
         events.push(sse("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
