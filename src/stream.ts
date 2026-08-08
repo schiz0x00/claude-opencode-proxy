@@ -28,10 +28,14 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
   // Latched by cancel() (client hung up) and by the first failed enqueue, so
   // both start() and the keep-alive timer can see it.
   let closed = false;
+  // Held for cancel(): start() locks the upstream body, and cancelling a
+  // locked stream throws. The reader is the only handle that can release it.
+  let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = upstream.body?.getReader();
+      upstreamReader = reader;
       if (!reader) {
         controller.close();
         return;
@@ -120,7 +124,11 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
     },
     cancel() {
       closed = true;
-      upstream.body?.cancel();
+      // Abort the upstream fetch so it does not keep streaming into nothing.
+      // This runs inside a stream callback, where a throw is fatal, and both
+      // calls can reject on an already-finished body.
+      const pending = upstreamReader ? upstreamReader.cancel() : upstream.body?.cancel();
+      void Promise.resolve(pending).catch(() => undefined);
     },
   });
 }

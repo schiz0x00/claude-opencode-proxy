@@ -82,3 +82,31 @@ describe("pumpStream error handling", () => {
     expect(text).not.toContain("message_stop");
   });
 });
+
+describe("pumpStream cancellation", () => {
+  it("cancels a locked upstream body without throwing", async () => {
+    const { pumpStream } = await import("../src/stream.js");
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'));
+        // Never closed: the client hangs up while upstream is still streaming.
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const out = pumpStream({
+      upstream: new Response(body),
+      upstreamFormat: "oa-compat",
+      clientFormat: "anthropic",
+    });
+    const reader = out.getReader();
+    await reader.read();
+    // start() holds a reader on the upstream body, so cancelling it through
+    // `upstream.body.cancel()` would throw "ReadableStream is locked".
+    await reader.cancel();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cancelled).toBe(true);
+  });
+});
