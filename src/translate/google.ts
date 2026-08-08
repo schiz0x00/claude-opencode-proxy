@@ -26,11 +26,13 @@ export function googleHelper(opts: ProviderHelperOptions): ProviderHelper {
       let usage: Usage | undefined;
       return {
         parse: (chunk: string) => {
-          const data = chunk.split("\n").find((l) => l.startsWith("data: "));
+          // `data:{...}` without the optional space is equally valid SSE;
+          // matching only "data: " silently dropped usage from such upstreams.
+          const data = chunk.split("\n").find((l) => l.startsWith("data:"));
           if (!data) return;
           let json: any;
           try {
-            json = JSON.parse(data.slice(6));
+            json = JSON.parse(data.slice(5).trim());
           } catch {
             return;
           }

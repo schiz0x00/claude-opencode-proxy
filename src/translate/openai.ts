@@ -25,10 +25,10 @@ export function openaiHelper(_opts: ProviderHelperOptions): ProviderHelper {
         parse: (chunk: string) => {
           const [event, data] = chunk.split("\n");
           if (event !== "event: response.completed") return;
-          if (!data?.startsWith("data: ")) return;
+          if (!data?.startsWith("data:")) return;
           let json: any;
           try {
-            json = JSON.parse(data.slice(6));
+            json = JSON.parse(data.slice(5).trim());
           } catch {
             return;
           }
