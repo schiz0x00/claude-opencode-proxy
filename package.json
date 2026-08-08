@@ -4,6 +4,22 @@
   "description": "Anthropic Messages API proxy that translates Claude Code traffic to OpenCode Zen/Go/Free wire formats",
   "type": "module",
   "license": "MIT",
+  "author": "makan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schiz0x00/claude-opencode-proxy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/schiz0x00/claude-opencode-proxy/issues"
+  },
+  "homepage": "https://github.com/schiz0x00/claude-opencode-proxy#readme",
+  "keywords": [
+    "claude-code",
+    "anthropic",
+    "opencode",
+    "proxy",
+    "llm-gateway"
+  ],
   "engines": {
     "node": ">=20"
   },

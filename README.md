@@ -1,5 +1,9 @@
 # claude-opencode-proxy
 
+[![CI](https://github.com/schiz0x00/claude-opencode-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/schiz0x00/claude-opencode-proxy/actions/workflows/ci.yml)
+[![Publish container](https://github.com/schiz0x00/claude-opencode-proxy/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/schiz0x00/claude-opencode-proxy/actions/workflows/docker-publish.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A local proxy that lets **Claude Code** talk to **OpenCode Zen / Go / Free**
 backends. It speaks the Anthropic Messages API on the client side and
 translates to the backend's native format (`anthropic`, `oa-compat`/OpenAI
@@ -96,6 +100,17 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL=mimo-v2.5-free
 
 ## Docker
 
+Prebuilt image (published on every merge to `main`):
+
+```bash
+docker run --rm -p 8787:8787 \
+  -e OPENCODE_BACKEND=zen \
+  -e OPENCODE_ZEN_API_KEY=... \
+  ghcr.io/schiz0x00/claude-opencode-proxy:latest
+```
+
+Or build locally:
+
 ```bash
 docker build -t claude-opencode-proxy .
 docker run --rm -p 8787:8787 \
@@ -128,3 +143,12 @@ Claude Code ── Anthropic Messages API ──▶ proxy ──▶ OpenCode bac
 - `src/stream.ts` — SSE pump (keep-alive, error passthrough, cost pings)
 - `src/modelRegistry.ts` — static + discovered + catalog model metadata
 - `src/capability.ts` — capability-aware request stripping
+
+## Contributing
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Branch off `dev`, open
+PRs against `dev`; merges to `main` publish the container image.
+
+## License
+
+[MIT](LICENSE)
