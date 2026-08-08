@@ -30,18 +30,14 @@ function makeApp() {
 }
 
 describe("createApp", () => {
-  it("answers CORS preflight with 204 and allow headers", async () => {
+  it("sends no CORS headers, so browser pages cannot reach the proxy", async () => {
     const app = makeApp();
-    const res = await app.request("/v1/messages", { method: "OPTIONS" });
-    expect(res.status).toBe(204);
-    expect(res.headers.get("access-control-allow-origin")).toBe("*");
-    expect(res.headers.get("access-control-allow-methods")).toContain("POST");
-  });
-
-  it("adds CORS headers to normal responses", async () => {
-    const app = makeApp();
+    // The proxy has no auth of its own and holds the OpenCode key; a wildcard
+    // origin would let any open page spend it.
     const res = await app.request("/v1/models");
-    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    const preflight = await app.request("/v1/messages", { method: "OPTIONS" });
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
   });
 
   it("serves health endpoints", async () => {
@@ -65,5 +61,52 @@ describe("createApp", () => {
     const app = makeApp();
     const res = await app.request("/nope");
     expect(res.status).toBe(404);
+  });
+});
+describe("pumpStream error handling", () => {
+  it("does not append message_stop after an oa-compat error envelope", async () => {
+    const { pumpStream } = await import("../src/stream.js");
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"error":{"message":"boom"}}\n\n'));
+        c.close();
+      },
+    });
+    const out = pumpStream({
+      upstream: new Response(body),
+      upstreamFormat: "oa-compat",
+      clientFormat: "anthropic",
+    });
+    const text = await new Response(out).text();
+    expect(text).toContain("boom");
+    expect(text).not.toContain("message_stop");
+  });
+});
+
+describe("pumpStream cancellation", () => {
+  it("cancels a locked upstream body without throwing", async () => {
+    const { pumpStream } = await import("../src/stream.js");
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'));
+        // Never closed: the client hangs up while upstream is still streaming.
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const out = pumpStream({
+      upstream: new Response(body),
+      upstreamFormat: "oa-compat",
+      clientFormat: "anthropic",
+    });
+    const reader = out.getReader();
+    await reader.read();
+    // start() holds a reader on the upstream body, so cancelling it through
+    // `upstream.body.cancel()` would throw "ReadableStream is locked".
+    await reader.cancel();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cancelled).toBe(true);
   });
 });

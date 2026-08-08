@@ -114,3 +114,24 @@ describe("handleCountTokens (POST /v1/messages/count_tokens)", () => {
     }
   });
 });
+describe("local estimate", () => {
+  it("counts tool_result payloads", async () => {
+    const deps = makeDeps("free", "http://127.0.0.1:1/v1");
+    const body = {
+      model: "deepseek-v4-flash-free",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: "x".repeat(400) },
+            { type: "tool_result", tool_use_id: "t2", content: [{ type: "text", text: "y".repeat(400) }] },
+          ],
+        },
+      ],
+    };
+    const res = await handleCountTokens(mockContext(body), deps);
+    const json = (await res.json()) as { input_tokens: number };
+    // 800 chars / 4 — previously 0, because tool_result nests under `content`.
+    expect(json.input_tokens).toBe(200);
+  });
+});

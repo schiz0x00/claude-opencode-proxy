@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyReasoningEffort, stripUnsupported } from "../src/capability.js";
+import { applyReasoningEffort, backfillReasoningContent, stripUnsupported } from "../src/capability.js";
 import { createLogger } from "../src/logging.js";
 
 const logger = createLogger("error");
@@ -133,5 +133,23 @@ describe("applyReasoningEffort", () => {
     const b: Record<string, any> = {};
     applyReasoningEffort(b, think(10_000), undefined);
     expect(b).toEqual({});
+  });
+});
+
+describe("backfillReasoningContent", () => {
+  it("gives every assistant message a reasoning_content, keeping real traces", () => {
+    const body: Record<string, any> = {
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "a", tool_calls: [{ id: "1" }] },
+        { role: "tool", tool_call_id: "1", content: "ok" },
+        { role: "assistant", content: "b", reasoning_content: "kept" },
+      ],
+    };
+    backfillReasoningContent(body);
+    expect(body.messages[1].reasoning_content).toBe("");
+    expect(body.messages[3].reasoning_content).toBe("kept");
+    expect(body.messages[0].reasoning_content).toBeUndefined();
+    expect(body.messages[2].reasoning_content).toBeUndefined();
   });
 });

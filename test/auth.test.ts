@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractApiKey, injectAuth } from "../src/auth.js";
+import { clearAuth, extractApiKey } from "../src/auth.js";
 
 describe("extractApiKey", () => {
   it("reads x-api-key", () => {
@@ -19,32 +19,10 @@ describe("extractApiKey", () => {
   });
 });
 
-describe("injectAuth", () => {
-  it("sets x-api-key for anthropic", () => {
-    const h = new Headers();
-    injectAuth(h, "anthropic", "k");
-    expect(h.get("x-api-key")).toBe("k");
-    expect(h.get("authorization")).toBeNull();
-  });
-
-  it("sets x-api-key for google", () => {
-    const h = new Headers();
-    injectAuth(h, "google", "k");
-    expect(h.get("x-api-key")).toBe("k");
-  });
-
-  it("sets Bearer for oa-compat and openai", () => {
-    for (const format of ["oa-compat", "openai"] as const) {
-      const h = new Headers();
-      injectAuth(h, format, "k");
-      expect(h.get("authorization")).toBe("Bearer k");
-      expect(h.get("x-api-key")).toBeNull();
-    }
-  });
-
-  it("removes all auth headers when key is undefined", () => {
-    const h = new Headers({ "x-api-key": "a", authorization: "Bearer b", "x-goog-api-key": "c" });
-    injectAuth(h, "anthropic", undefined);
+describe("clearAuth", () => {
+  it("removes every auth header", () => {
+    const h = new Headers({ "x-api-key": "k", authorization: "Bearer k", "x-goog-api-key": "k" });
+    clearAuth(h);
     expect(h.get("x-api-key")).toBeNull();
     expect(h.get("authorization")).toBeNull();
     expect(h.get("x-goog-api-key")).toBeNull();

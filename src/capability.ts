@@ -48,6 +48,24 @@ export function applyReasoningEffort(
 }
 
 /**
+ * DeepSeek-family thinking mode rejects any request whose history contains an
+ * assistant message without `reasoning_content` once tools are in play
+ * ("The `reasoning_content` in the thinking mode must be passed back to the
+ * API.", HTTP 400). Claude Code drops thinking blocks from older turns, so the
+ * trace is genuinely gone by then — an empty string satisfies the check.
+ *
+ * Only fills messages that carry none; real traces translated from `thinking`
+ * blocks are left untouched. Mutates `upstreamBody` in place.
+ */
+export function backfillReasoningContent(upstreamBody: Record<string, any>): void {
+  if (!Array.isArray(upstreamBody.messages)) return;
+  for (const msg of upstreamBody.messages) {
+    if (msg?.role !== "assistant") continue;
+    if (typeof msg.reasoning_content !== "string") msg.reasoning_content = "";
+  }
+}
+
+/**
  * Pick the advertised effort value closest to the requested budget. The
  * thresholds mirror Claude Code's three tiers; `none`/`minimal` are never
  * chosen for an enabled thinking block, since asking to think and being told

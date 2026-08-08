@@ -47,6 +47,11 @@ export interface RegistryRefreshOptions {
   logger: Logger;
   /** Per-fetch timeout in ms (default 3000). */
   timeoutMs?: number;
+  /**
+   * Skip the network when the cache on disk is younger than this many seconds.
+   * Omit to always refresh.
+   */
+  maxCacheAgeSeconds?: number;
 }
 
 export interface ModelRegistry {
@@ -104,6 +109,8 @@ interface CacheFile {
 }
 
 interface CatalogMeta {
+  /** Catalog prices this model at zero, i.e. it is served on the free lane. */
+  free?: boolean;
   contextWindow?: number;
   maxOutput?: number;
   capabilities?: Partial<Capabilities>;
@@ -150,7 +157,13 @@ export function createRegistry(backend: Backend): ModelRegistry {
     let entry = entries.get(base);
     if (!entry) {
       const real = fromAliasId(base);
-      if (real) entry = entries.get(real);
+      if (real) {
+        const candidate = entries.get(real);
+        // The alias carries the wire format. Honouring an alias whose format
+        // disagrees with the registry would route the request through the
+        // wrong translator and produce a body the upstream cannot parse.
+        if (candidate && aliasFormat(base) === candidate.format) entry = candidate;
+      }
     }
     if (!entry) return undefined;
     return { entry, contextVariant };
@@ -158,6 +171,14 @@ export function createRegistry(backend: Backend): ModelRegistry {
 
   function toAliasId(entry: ModelEntry): string {
     return `${ALIAS_PREFIX}${entry.format}--${entry.id}`;
+  }
+
+  /** Format segment of an alias id, or undefined when it is not an alias. */
+  function aliasFormat(alias: string): string | undefined {
+    if (!alias.startsWith(ALIAS_PREFIX)) return undefined;
+    const rest = alias.slice(ALIAS_PREFIX.length);
+    const sep = rest.indexOf("--");
+    return sep === -1 ? undefined : rest.slice(0, sep);
   }
 
   function fromAliasId(alias: string): string | undefined {
@@ -168,14 +189,15 @@ export function createRegistry(backend: Backend): ModelRegistry {
     return rest.slice(sep + 2);
   }
 
-  /** Load the cache file; returns entries or undefined on any failure. */
-  async function loadCache(cacheFile: string): Promise<CacheFile["models"] | undefined> {
+  /** Load the cache file; returns it or undefined on any failure. */
+  async function loadCache(cacheFile: string): Promise<CacheFile | undefined> {
     try {
       const raw = await readFile(expandHome(cacheFile), "utf8");
       const parsed = JSON.parse(raw) as CacheFile;
       if (parsed.version !== CACHE_VERSION || parsed.backend !== backend) return undefined;
       if (!Array.isArray(parsed.models)) return undefined;
-      return parsed.models;
+      if (typeof parsed.fetchedAt !== "number") return undefined;
+      return parsed;
     } catch {
       return undefined;
     }
@@ -295,7 +317,9 @@ export function createRegistry(backend: Backend): ModelRegistry {
     const limit = (v.limit ?? {}) as Record<string, any>;
     const modalities = (v.modalities ?? {}) as Record<string, any>;
     const input = Array.isArray(modalities.input) ? modalities.input : [];
+    const cost = (v.cost ?? {}) as Record<string, any>;
     return {
+      free: cost.input === 0 && cost.output === 0,
       contextWindow: limit.context,
       maxOutput: limit.output,
       reasoningOptions: parseReasoningOptions(v.reasoning_options),
@@ -334,9 +358,16 @@ export function createRegistry(backend: Backend): ModelRegistry {
     // the static snapshot so checked-in capability metadata survives; the
     // cache fills in last-known context/output and adds discovered ids.
     const cached = await loadCache(cacheFile);
-    if (cached && cached.length > 0) {
-      applyCache(cached);
-      logger.debug(`model cache loaded (${cached.length} models)`);
+    if (cached && cached.models.length > 0) {
+      applyCache(cached.models);
+      logger.debug(`model cache loaded (${cached.models.length} models)`);
+      // `fetchedAt` exists so a restart inside the TTL does not re-download
+      // discovery plus the multi-megabyte catalog for an answer it already has.
+      const age = Math.floor(Date.now() / 1000) - cached.fetchedAt;
+      if (opts.maxCacheAgeSeconds !== undefined && age >= 0 && age < opts.maxCacheAgeSeconds) {
+        logger.debug(`model cache is ${age}s old, skipping refresh`);
+        return;
+      }
     }
 
     // 2. Live discovery + catalog metadata.
@@ -348,10 +379,22 @@ export function createRegistry(backend: Backend): ModelRegistry {
       // fall through with whatever we have
     }
 
-    if (liveIds.length > 0) {
+    // The free backend shares the Zen base URL, so discovery hands back every
+    // paid model too. Serving those would put ids in the client's picker that
+    // the free lane answers with a 401, since it sends no key at all — keep
+    // only what the catalog prices at zero.
+    const servable =
+      backend === "free"
+        // Drop only what the catalog positively prices as paid. An id the
+        // catalog has not caught up with yet stays — hiding a model we cannot
+        // classify is worse than listing one that might 401.
+        ? liveIds.filter((id) => catalog.get(id)?.free !== false)
+        : liveIds;
+
+    if (servable.length > 0) {
       // Live ids win: keep existing metadata where known, else defaults.
       const merged: Array<Omit<ModelEntry, "capabilities"> & { capabilities?: Partial<Capabilities> }> = [];
-      for (const id of liveIds) {
+      for (const id of servable) {
         const existing = entries.get(id);
         const cat = catalog.get(id);
         merged.push({
@@ -367,12 +410,16 @@ export function createRegistry(backend: Backend): ModelRegistry {
           capabilities: { ...(existing?.capabilities ?? {}), ...(cat?.capabilities ?? {}) },
         });
       }
-      // Static-only models not seen live are kept (docs may lag the API).
+      // Snapshot models not seen live are kept (docs may lag the API). Only
+      // the snapshot — carrying over everything currently in `entries` would
+      // resurrect ids a stale cache added, including ones discovery just
+      // filtered out.
+      const snapshot = new Set(STATIC_MODELS[backend].map((sm) => sm.id));
       for (const [id, e] of entries) {
-        if (!merged.some((m) => m.id === id)) merged.push(e);
+        if (snapshot.has(id) && !merged.some((m) => m.id === id)) merged.push(e);
       }
       mergeEntries(merged);
-      logger.info(`model discovery: ${liveIds.length} live ids, ${entries.size} total`);
+      logger.info(`model discovery: ${liveIds.length} live ids, ${servable.length} servable, ${entries.size} total`);
     } else if (catalog.size > 0) {
       // Discovery unavailable (offline, 404, auth): still take catalog
       // metadata for the ids we already know, so reasoning options and

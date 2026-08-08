@@ -1,6 +1,6 @@
 import type { Context } from "hono";
-import { extractApiKey } from "./auth.js";
-import { applyReasoningEffort, stripUnsupported } from "./capability.js";
+import { clearAuth, extractApiKey } from "./auth.js";
+import { applyReasoningEffort, backfillReasoningContent, stripUnsupported } from "./capability.js";
 import type { Config } from "./config.js";
 import { ProxyError } from "./errors.js";
 import type { Logger } from "./logging.js";
@@ -84,6 +84,7 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
     // conversion); everything else needs the catalog-advertised knob.
     if (format !== "anthropic" && entry.capabilities.reasoning) {
       applyReasoningEffort(upstreamBody, thinking, entry.reasoningOptions);
+      backfillReasoningContent(upstreamBody);
     }
     upstreamBody = provider.modifyBody(upstreamBody);
   } catch (err) {
@@ -105,11 +106,7 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
   }
   const stickyId = c.req.header("x-claude-code-session-id") ?? "";
   provider.modifyHeaders(headers, apiKey ?? "", stickyId);
-  if (apiKey === undefined) {
-    headers.delete("x-api-key");
-    headers.delete("authorization");
-    headers.delete("x-goog-api-key");
-  }
+  if (apiKey === undefined) clearAuth(headers);
 
   const url = provider.modifyUrl(config.baseUrl, isStream);
 
@@ -139,10 +136,13 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
   if (!upstream.ok) {
     const bodyText = await upstream.text();
     logger.warn(`upstream ${upstream.status} for model ${modelId}`);
-    return new Response(bodyText, {
-      status: upstream.status,
-      headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
-    });
+    const errorHeaders: Record<string, string> = {
+      "content-type": upstream.headers.get("content-type") ?? "application/json",
+    };
+    // Claude Code waits out a 429 based on this; dropping it makes it guess.
+    const retryAfter = upstream.headers.get("retry-after");
+    if (retryAfter) errorHeaders["retry-after"] = retryAfter;
+    return new Response(bodyText, { status: upstream.status, headers: errorHeaders });
   }
 
   if (isStream) {
@@ -210,11 +210,7 @@ export async function handleCountTokens(c: Context, deps: RouterDeps): Promise<R
       supports1m: resolved.entry.contextWindow >= 1_000_000 || resolved.contextVariant === "1m",
     });
     provider.modifyHeaders(headers, apiKey ?? "", "");
-    if (apiKey === undefined) {
-      headers.delete("x-api-key");
-      headers.delete("authorization");
-      headers.delete("x-goog-api-key");
-    }
+    if (apiKey === undefined) clearAuth(headers);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
     try {
@@ -260,6 +256,10 @@ function localEstimate(body: any): Response {
       else if (obj.input && typeof obj.input === "object") {
         chars += JSON.stringify(obj.input).length;
       }
+      // tool_result nests its payload under `content`, as a string or as
+      // further blocks. In an agent session that payload is most of the
+      // context, so skipping it made the estimate useless.
+      if (obj.content !== undefined) countText(obj.content);
     }
   };
   countText(body?.system);
@@ -333,8 +333,13 @@ async function fetchWithRetry(
       });
       if (res.ok || (res.status < 500 && res.status !== 429)) return res;
       // Transient upstream failure: drain the body so the socket can be reused.
-      await res.text().catch(() => undefined);
-      if (attempt >= maxRetries) return res;
+      const drained = await res.text().catch(() => "");
+      // Out of attempts: hand back the text we drained. Returning `res` itself
+      // would give the caller a consumed body, and reading it again throws —
+      // turning a 429 the client knows how to back off from into a 500.
+      if (attempt >= maxRetries) {
+        return new Response(drained, { status: res.status, headers: res.headers });
+      }
       logger.warn(`upstream ${res.status}, retrying (${attempt + 1}/${maxRetries})`);
     } catch (err) {
       lastErr = err as Error;

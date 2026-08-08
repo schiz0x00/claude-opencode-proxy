@@ -50,6 +50,7 @@ async function refreshModels(): Promise<void> {
       baseUrl: config.baseUrl,
       cacheFile: config.modelCacheFile,
       logger,
+      maxCacheAgeSeconds: config.modelCacheTtl,
     });
   } catch (err) {
     logger.warn(`model refresh failed: ${(err as Error).message}`);
@@ -57,12 +58,15 @@ async function refreshModels(): Promise<void> {
 }
 
 void refreshModels();
-const refreshTimer = setInterval(refreshModels, config.modelCacheTtl * 1000);
-refreshTimer.unref();
+// TTL 0 means "startup refresh only". Scheduling it would be setInterval(…, 0),
+// which hammers the discovery and catalog endpoints in a tight loop.
+const refreshTimer =
+  config.modelCacheTtl > 0 ? setInterval(refreshModels, config.modelCacheTtl * 1000) : undefined;
+refreshTimer?.unref();
 
 function shutdown(signal: string): void {
   logger.info(`received ${signal}, shutting down`);
-  clearInterval(refreshTimer);
+  if (refreshTimer) clearInterval(refreshTimer);
   server.close(() => process.exit(0));
   // Force-exit if in-flight requests refuse to drain.
   setTimeout(() => process.exit(0), 5000).unref();

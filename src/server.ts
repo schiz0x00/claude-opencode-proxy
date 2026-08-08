@@ -1,6 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import type { Config } from "./config.js";
 import { anthropicError, ProxyError } from "./errors.js";
 import { registerHealth } from "./health.js";
@@ -24,15 +23,10 @@ export function createApp(deps: ServerDeps): Hono {
   const { config, logger } = deps;
   const app = new Hono();
 
-  app.use(
-    "*",
-    cors({
-      origin: "*",
-      allowMethods: ["POST", "GET", "OPTIONS"],
-      allowHeaders: ["*"],
-      maxAge: 86_400,
-    }),
-  );
+  // No CORS headers on purpose. The clients are CLIs, which do not need them,
+  // and this proxy has no authentication of its own: with `Access-Control-
+  // Allow-Origin: *` any page in the user's browser could POST to
+  // 127.0.0.1:8787 and spend the configured OpenCode key.
 
   registerHealth(app, deps);
 

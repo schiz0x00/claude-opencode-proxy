@@ -25,9 +25,17 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
   const sameFormat = upstreamFormat === clientFormat;
   const usageParser = getProvider(upstreamFormat, { model: "", providerModel: "" }).createUsageParser();
 
+  // Latched by cancel() (client hung up) and by the first failed enqueue, so
+  // both start() and the keep-alive timer can see it.
+  let closed = false;
+  // Held for cancel(): start() locks the upstream body, and cancelling a
+  // locked stream throws. The reader is the only handle that can release it.
+  let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = upstream.body?.getReader();
+      upstreamReader = reader;
       if (!reader) {
         controller.close();
         return;
@@ -38,18 +46,30 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
       let sawMessageStop = false;
       let sawError = false;
 
-      const keepAlive = setInterval(() => {
-        if (upstreamDone) return;
-        if (Date.now() - lastWrite >= KEEP_ALIVE_MS) {
-          controller.enqueue(encoder.encode(`event: ping\ndata: {"type":"ping"}\n\n`));
+      // A cancelled stream (client hung up) closes the controller while the
+      // read loop is still awaiting upstream, so every enqueue after that
+      // point throws. Inside the interval callback that throw is uncaught and
+      // takes the process down, so all writes go through this guard.
+      const write = (text: string): void => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(text));
           lastWrite = Date.now();
+        } catch {
+          closed = true;
+        }
+      };
+
+      const keepAlive = setInterval(() => {
+        if (upstreamDone || closed) return;
+        if (Date.now() - lastWrite >= KEEP_ALIVE_MS) {
+          write(`event: ping\ndata: {"type":"ping"}\n\n`);
         }
       }, KEEP_ALIVE_MS);
 
       const emit = (block: string): void => {
         if (!block) return;
-        controller.enqueue(encoder.encode(block + "\n\n"));
-        lastWrite = Date.now();
+        write(block + "\n\n");
       };
 
       const processBlock = (block: string): void => {
@@ -57,7 +77,9 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
         if (ev === "message_stop") sawMessageStop = true;
         // Mid-stream upstream error: forward verbatim and suppress the synthetic
         // `message_stop` so we close the stream as the spec requires (§9.2.3).
-        if (ev === "error") sawError = true;
+        // oa-compat upstreams have no event line — they just send an error
+        // envelope as data, so the payload has to be inspected too.
+        if (ev === "error" || isErrorPayload(block)) sawError = true;
         if (upstreamFormat === "oa-compat" && block.trim() === "data: [DONE]") return;
         usageParser.parse(block);
         if (sameFormat) {
@@ -84,7 +106,7 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
       }
 
       if (clientFormat === "anthropic" && !sawMessageStop && !sawError) {
-        controller.enqueue(encoder.encode(`event: message_stop\ndata: {"type":"message_stop"}\n\n`));
+        write(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
       }
 
       // Cost ping (spec §9.2.7): after the final chunk, from normalized usage.
@@ -92,17 +114,21 @@ export function pumpStream(opts: PumpOptions): ReadableStream<Uint8Array> {
         const usage = usageParser.retrieve();
         if (usage) {
           const normalized = getProvider(upstreamFormat, { model: "", providerModel: "" }).normalizeUsage(usage);
-          controller.enqueue(
-            encoder.encode(
-              `event: ping\ndata: ${JSON.stringify({ type: "ping", cost: normalized })}\n\n`,
-            ),
-          );
+          write(`event: ping\ndata: ${JSON.stringify({ type: "ping", cost: normalized })}\n\n`);
         }
       }
-      controller.close();
+      if (!closed) {
+        closed = true;
+        controller.close();
+      }
     },
     cancel() {
-      upstream.body?.cancel();
+      closed = true;
+      // Abort the upstream fetch so it does not keep streaming into nothing.
+      // This runs inside a stream callback, where a throw is fatal, and both
+      // calls can reject on an already-finished body.
+      const pending = upstreamReader ? upstreamReader.cancel() : upstream.body?.cancel();
+      void Promise.resolve(pending).catch(() => undefined);
     },
   });
 }
@@ -127,6 +153,20 @@ function createSseSplitter(): { push: (text: string) => string[]; flush: () => s
       return blocks;
     },
   };
+}
+
+/** True when an SSE block's data payload is an error envelope. */
+function isErrorPayload(block: string): boolean {
+  const line = block.split("\n").find((l) => l.startsWith("data:"));
+  if (!line) return false;
+  const payload = line.slice(5).trim();
+  if (payload === "[DONE]" || !payload.startsWith("{")) return false;
+  try {
+    const json = JSON.parse(payload) as { error?: unknown };
+    return json?.error !== undefined && json.error !== null;
+  } catch {
+    return false;
+  }
 }
 
 function eventType(block: string): string {

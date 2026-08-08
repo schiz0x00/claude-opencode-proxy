@@ -187,7 +187,7 @@ function loadConfig(env: NodeJS.ProcessEnv): Config;   // throws on invalid
 | `GET` | `/healthz` | liveness → `200 {"status":"ok"}` |
 | `GET` | `/ready` | readiness → `200` once config + registry loaded |
 | `GET` | `/` | info JSON: version, backend, model count |
-| `OPTIONS` | `*` | CORS preflight → `204` with `Access-Control-Allow-*` |
+| `OPTIONS` | `*` | not handled → `404`; no CORS headers are sent (see §13.3) |
 
 ### 5.1 `GET /v1/models` response shape
 
@@ -743,8 +743,10 @@ class ProxyError extends Error {
 - Build `hono` app; register routes per §5.
 - Global error middleware: catch `ProxyError` → Anthropic envelope; catch
   unknown → `500` envelope; log.
-- CORS middleware: `OPTIONS *` → `204` with `Access-Control-Allow-Origin: *`,
-  `-Methods: POST, GET, OPTIONS`, `-Headers: *`.
+- No CORS middleware. The clients are CLIs and do not need it, while the proxy
+  has no authentication of its own: `Access-Control-Allow-Origin: *` would let
+  any page open in the user's browser POST to the local port and spend the
+  configured OpenCode key.
 - `GET /` info: `{ name, version, backend, modelCount }`.
 
 ### 13.4 `router.ts`

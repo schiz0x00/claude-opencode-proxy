@@ -202,7 +202,10 @@ function toTarget(chunk: CommonChunk, to: Format): string {
 
 function openaiChunkToSse(chunk: CommonChunk): string {
   const events: string[] = [];
-  const delta = chunk.choices[0].delta;
+  // `stream_options.include_usage` produces a final chunk with `choices: []`.
+  const choice = chunk.choices[0];
+  if (!choice) return "";
+  const delta = choice.delta;
   if (delta.content) {
     events.push(
       `event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", delta: delta.content })}`,
@@ -228,7 +231,7 @@ function openaiChunkToSse(chunk: CommonChunk): string {
       );
     }
   }
-  if (chunk.choices[0].finish_reason) {
+  if (choice.finish_reason) {
     events.push(
       `event: response.completed\ndata: ${JSON.stringify({
         type: "response.completed",
@@ -241,7 +244,8 @@ function openaiChunkToSse(chunk: CommonChunk): string {
 
 function googleChunkFromCommon(chunk: CommonChunk): Record<string, unknown> {
   const parts: Array<Record<string, unknown>> = [];
-  const delta = chunk.choices[0].delta;
+  const choice = chunk.choices[0];
+  const delta = choice?.delta ?? {};
   if (delta.content) parts.push({ text: delta.content });
   for (const tc of delta.tool_calls ?? []) {
     if (tc.function?.name) parts.push({ functionCall: { name: tc.function.name, args: {} } });
@@ -249,16 +253,14 @@ function googleChunkFromCommon(chunk: CommonChunk): Record<string, unknown> {
   return {
     candidates: [
       {
-        index: chunk.choices[0].index,
+        index: choice?.index ?? 0,
         content: { role: "model", parts },
-        finishReason: chunk.choices[0].finish_reason
-          ? chunk.choices[0].finish_reason === "stop"
-            ? "STOP"
-            : chunk.choices[0].finish_reason === "tool_calls"
-              ? "TOOL_CALLS"
-              : chunk.choices[0].finish_reason === "length"
-                ? "MAX_TOKENS"
-                : "STOP"
+        finishReason: choice?.finish_reason
+          ? choice.finish_reason === "tool_calls"
+            ? "TOOL_CALLS"
+            : choice.finish_reason === "length"
+              ? "MAX_TOKENS"
+              : "STOP"
           : undefined,
       },
     ],

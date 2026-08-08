@@ -48,6 +48,40 @@ function makeDeps(baseUrl: string) {
   };
 }
 
+describe("handleMessages upstream errors", () => {
+  let server: Server | undefined;
+
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((r) => server!.close(() => r()));
+      server = undefined;
+    }
+  });
+
+  it("forwards a retried-out 429 with its body and retry-after", async () => {
+    server = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(429, { "content-type": "application/json", "retry-after": "7" });
+        res.end('{"type":"error","error":{"message":"slow down"}}');
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
+    const port = (server!.address() as { port: number }).port;
+
+    const deps = makeDeps(`http://127.0.0.1:${port}/v1`);
+    deps.config = { ...deps.config, maxRetries: 1 } as never;
+    const res = await handleMessages(
+      mockContext({ model: "deepseek-v4-flash-free", max_tokens: 16, messages: [{ role: "user", content: "hi" }] }),
+      deps,
+    );
+    expect(res.status).toBe(429);
+    // Body survives the retry drain instead of throwing "Body is unusable".
+    expect(await res.text()).toContain("slow down");
+    expect(res.headers.get("retry-after")).toBe("7");
+  });
+});
+
 describe("handleMessages provider body modification", () => {
   let server: Server | undefined;
 

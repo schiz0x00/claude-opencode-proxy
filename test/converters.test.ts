@@ -418,6 +418,30 @@ describe("streamed text blocks", () => {
     expect(out.match(/"content_block_delta","index":(\d+)/g)?.every((m) => m.endsWith(":0"))).toBe(true);
   });
 
+  it("keeps parallel tool calls in separate blocks", () => {
+    const to = createStreamPartConverter("oa-compat", "anthropic")!;
+    const chunk = (delta: unknown, finish: string | null = null) =>
+      to(
+        `data: ${JSON.stringify({
+          id: "c",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "m",
+          choices: [{ index: 0, delta, finish_reason: finish }],
+        })}`,
+      );
+    chunk({ tool_calls: [{ index: 0, id: "a", type: "function", function: { name: "Read", arguments: "" } }] });
+    chunk({ tool_calls: [{ index: 1, id: "b", type: "function", function: { name: "Grep", arguments: "" } }] });
+    // Arguments for call 0 arrive after call 1 opened: they belong to block 0.
+    const out = chunk({ tool_calls: [{ index: 0, function: { arguments: '{"p":1}' } }] });
+    expect(out).toContain('"content_block_delta","index":0');
+    expect(out).not.toContain('"content_block_delta","index":1');
+    // Both blocks are closed at the finish.
+    const end = chunk({}, "tool_calls");
+    expect(end).toContain('"content_block_stop","index":0');
+    expect(end).toContain('"content_block_stop","index":1');
+  });
+
   it("closes the text block before opening a tool block", () => {
     const to = createStreamPartConverter("oa-compat", "anthropic")!;
     const chunk = (delta: unknown) =>
@@ -435,5 +459,18 @@ describe("streamed text blocks", () => {
       tool_calls: [{ index: 0, id: "t1", type: "function", function: { name: "Read", arguments: "" } }],
     });
     expect(out.indexOf("content_block_stop")).toBeLessThan(out.indexOf('"type":"tool_use"'));
+  });
+});
+
+describe("anthropic provider headers", () => {
+  it("adds context-1m without dropping the client's other betas", async () => {
+    const { getProvider } = await import("../src/translate/provider.js");
+    const p = getProvider("anthropic", { model: "claude-sonnet-5", providerModel: "claude-sonnet-5", supports1m: true });
+    const headers = new Headers({ "anthropic-beta": "token-efficient-tools-2024-11-01" });
+    p.modifyHeaders(headers, "k", "");
+    expect(headers.get("anthropic-beta")).toBe("token-efficient-tools-2024-11-01,context-1m-2025-08-07");
+    // Idempotent: a second pass does not duplicate the flag.
+    p.modifyHeaders(headers, "k", "");
+    expect(headers.get("anthropic-beta")).toBe("token-efficient-tools-2024-11-01,context-1m-2025-08-07");
   });
 });
