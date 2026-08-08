@@ -461,3 +461,16 @@ describe("streamed text blocks", () => {
     expect(out.indexOf("content_block_stop")).toBeLessThan(out.indexOf('"type":"tool_use"'));
   });
 });
+
+describe("anthropic provider headers", () => {
+  it("adds context-1m without dropping the client's other betas", async () => {
+    const { getProvider } = await import("../src/translate/provider.js");
+    const p = getProvider("anthropic", { model: "claude-sonnet-5", providerModel: "claude-sonnet-5", supports1m: true });
+    const headers = new Headers({ "anthropic-beta": "token-efficient-tools-2024-11-01" });
+    p.modifyHeaders(headers, "k", "");
+    expect(headers.get("anthropic-beta")).toBe("token-efficient-tools-2024-11-01,context-1m-2025-08-07");
+    // Idempotent: a second pass does not duplicate the flag.
+    p.modifyHeaders(headers, "k", "");
+    expect(headers.get("anthropic-beta")).toBe("token-efficient-tools-2024-11-01,context-1m-2025-08-07");
+  });
+});

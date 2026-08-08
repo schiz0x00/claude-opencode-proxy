@@ -9,6 +9,23 @@ type Usage = {
   output_tokens?: number;
 };
 
+/**
+ * Add one beta flag to `anthropic-beta` without discarding the ones the client
+ * already asked for (token-efficient tools, fine-grained streaming, …) — the
+ * header is a comma-separated list, and overwriting it silently turns those
+ * features off.
+ */
+function addBeta(headers: Headers, flag: string): void {
+  const current = headers.get("anthropic-beta");
+  if (!current) {
+    headers.set("anthropic-beta", flag);
+    return;
+  }
+  const flags = current.split(",").map((f) => f.trim()).filter(Boolean);
+  if (flags.includes(flag)) return;
+  headers.set("anthropic-beta", [...flags, flag].join(","));
+}
+
 /** Anthropic Messages provider helper (spec §7.2). */
 export function anthropicHelper(opts: ProviderHelperOptions): ProviderHelper {
   // 1M-context support is derived from the registry entry / `[1m]` variant
@@ -24,7 +41,7 @@ export function anthropicHelper(opts: ProviderHelperOptions): ProviderHelper {
     modifyHeaders: (headers: Headers, apiKey: string, _stickyId: string) => {
       headers.set("x-api-key", apiKey);
       headers.set("anthropic-version", headers.get("anthropic-version") ?? "2023-06-01");
-      if (supports1m) headers.set("anthropic-beta", "context-1m-2025-08-07");
+      if (supports1m) addBeta(headers, "context-1m-2025-08-07");
     },
     modifyBody: (body: Record<string, any>) => body,
     createBinaryStreamDecoder: () => undefined,
