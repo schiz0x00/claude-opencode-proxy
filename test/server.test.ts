@@ -30,18 +30,14 @@ function makeApp() {
 }
 
 describe("createApp", () => {
-  it("answers CORS preflight with 204 and allow headers", async () => {
+  it("sends no CORS headers, so browser pages cannot reach the proxy", async () => {
     const app = makeApp();
-    const res = await app.request("/v1/messages", { method: "OPTIONS" });
-    expect(res.status).toBe(204);
-    expect(res.headers.get("access-control-allow-origin")).toBe("*");
-    expect(res.headers.get("access-control-allow-methods")).toContain("POST");
-  });
-
-  it("adds CORS headers to normal responses", async () => {
-    const app = makeApp();
+    // The proxy has no auth of its own and holds the OpenCode key; a wildcard
+    // origin would let any open page spend it.
     const res = await app.request("/v1/models");
-    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    const preflight = await app.request("/v1/messages", { method: "OPTIONS" });
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
   });
 
   it("serves health endpoints", async () => {
