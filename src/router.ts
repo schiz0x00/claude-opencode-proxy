@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { extractApiKey } from "./auth.js";
-import { applyReasoningEffort, stripUnsupported } from "./capability.js";
+import { applyReasoningEffort, backfillReasoningContent, stripUnsupported } from "./capability.js";
 import type { Config } from "./config.js";
 import { ProxyError } from "./errors.js";
 import type { Logger } from "./logging.js";
@@ -84,6 +84,7 @@ export async function handleMessages(c: Context, deps: RouterDeps): Promise<Resp
     // conversion); everything else needs the catalog-advertised knob.
     if (format !== "anthropic" && entry.capabilities.reasoning) {
       applyReasoningEffort(upstreamBody, thinking, entry.reasoningOptions);
+      backfillReasoningContent(upstreamBody);
     }
     upstreamBody = provider.modifyBody(upstreamBody);
   } catch (err) {
