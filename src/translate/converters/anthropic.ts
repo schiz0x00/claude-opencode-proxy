@@ -528,6 +528,7 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
   let thinkingBlockIndex = -1;
   let sawFinish = false;
   let sawUsage = false;
+  let stopReason: string | null = null;
 
   return (chunk: CommonChunk): string => {
     const events: string[] = [];
@@ -657,6 +658,7 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
     const finish = choice?.finish_reason;
     if (finish && !sawFinish) {
       sawFinish = true;
+      stopReason = mapFinishReason(finish);
       for (const target of toolBlocks.values()) {
         events.push(sse("content_block_stop", { type: "content_block_stop", index: target }));
       }
@@ -668,7 +670,7 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
       events.push(
         sse("message_delta", {
           type: "message_delta",
-          delta: { stop_reason: mapFinishReason(finish), stop_sequence: null },
+          delta: { stop_reason: stopReason, stop_sequence: null },
           usage: { output_tokens: 0 },
         }),
       );
@@ -679,7 +681,10 @@ export function createToAnthropicChunk(): (chunk: CommonChunk) => string {
       events.push(
         sse("message_delta", {
           type: "message_delta",
-          delta: { stop_reason: null, stop_sequence: null },
+          // Usage lands in its own message_delta because oa-compat only sends
+          // it after the finish chunk. Repeat the stop reason rather than
+          // sending null, which reads as "undo the stop reason I just gave".
+          delta: { stop_reason: stopReason, stop_sequence: null },
           usage: {
             input_tokens: chunk.usage.prompt_tokens ?? 0,
             output_tokens: chunk.usage.completion_tokens ?? 0,
